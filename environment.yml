@@ -1,0 +1,28 @@
+name: gsmm_pipeline
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  # Sequence handling
+  - biopython>=1.81
+  # Alignment (required by CarveMe)
+  - diamond>=2.1
+  # Visualization – conda-managed for binary deps
+  - matplotlib>=3.7
+  - seaborn>=0.12
+  - networkx>=3.1
+  - scipy>=1.11          # spring-layout & stats helpers
+  # CarveMe via pip (most up-to-date)
+  - pip:
+      - carveme>=1.6.2
+      - cobra>=0.29.0
+      - pandas>=2.0
+      - openpyxl>=3.1        # optional Excel export
+      - tqdm>=4.65
+      - colorlog>=6.7
+      - plotly>=5.18         # interactive HTML charts
+      - escher>=1.7.3        # interactive metabolic maps
+      - kaleido>=0.2.1       # static export for plotly figures
