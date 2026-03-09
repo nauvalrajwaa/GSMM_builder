@@ -1,0 +1,28 @@
+[
+  {
+    "accession": "NC_000913.3",
+    "organism": "Escherichia coli",
+    "strain": "K-12 substr. MG1655",
+    "passed": true,
+    "steps": [
+      {
+        "name": "fetch_ncbi",
+        "ok": true,
+        "elapsed": 0.0,
+        "notes": "skipped (files exist)"
+      },
+      {
+        "name": "generate_model",
+        "ok": true,
+        "elapsed": 87.27,
+        "notes": "\u001b[32m12:10:08 [INFO]   Reactions   : 2885\u001b[0m  |  \u001b[32m12:10:08 [INFO]   Metabolites : 1816\u001b[0m  |  \u001b[32m12:10:08 [INFO]   Genes       : 1655\u001b[0m  |  \u001b[32m12:10:09 [INFO]   FBA growth  : 141.477921  (status: optimal)\u001b[0m  |  \u001b[32m12:10:58 [INFO]   Blocked rxns: 17 / 2885  (0.6%)\u001b[0m"
+      },
+      {
+        "name": "visualize_model",
+        "ok": true,
+        "elapsed": 93.26,
+        "notes": "10/11 output files present  |  optional present: escher_map.html"
+      }
+    ]
+  }
+]

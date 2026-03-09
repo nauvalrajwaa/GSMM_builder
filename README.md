@@ -2,7 +2,8 @@
 
 Automated pipeline for generating a **Genome-Scale Metabolic Model (GSMM)**
 from a FASTA + GenBank genomic input using **CarveMe** and **COBRApy**,
-with optional **comprehensive visualizations**.
+with optional **comprehensive visualizations** and built-in **NCBI data fetching**
+for testing.
 
 ---
 
@@ -10,6 +11,7 @@ with optional **comprehensive visualizations**.
 
 - [Miniconda](https://docs.conda.io/en/latest/miniconda.html) or Anaconda
 - GLPK solver (bundled via conda) **or** CPLEX (optional, faster)
+- Internet access for NCBI downloads
 
 ---
 
@@ -26,18 +28,145 @@ carve --download
 
 ---
 
-## Input files
+## Scripts overview
+
+| Script | Purpose |
+|--------|---------|
+| `fetch_ncbi.py` | Download FASTA + GenBank from NCBI RefSeq by accession |
+| `generate_model.py` | Full GSMM pipeline: extract proteins → CarveMe → COBRApy QC |
+| `visualize_model.py` | Comprehensive model visualization (standalone or via pipeline) |
+| `run_tests.py` | End-to-end test runner: fetch → pipeline → visualize, with pass/fail report |
+
+---
+
+## Quick start: test with real data (E. coli K-12)
+
+The fastest way to verify the full pipeline using the built-in *E. coli* K-12
+test dataset:
+
+```bash
+# One command – downloads genome, builds model, generates all visualizations
+python run_tests.py --email your@email.com
+```
+
+This will:
+1. Download `NC_000913.3` (*E. coli* K-12 MG1655) from NCBI into `tests/NC_000913_3/`
+2. Run the GSMM pipeline; model saved to `tests/NC_000913_3/output/model.xml`
+3. Generate all visualizations in `tests/NC_000913_3/output/viz/`
+4. Print a pass/fail summary table and write `tests/test_report.json`
+
+---
+
+## Fetching NCBI data manually (`fetch_ncbi.py`)
+
+```bash
+# Fetch the built-in E. coli K-12 test genome
+python fetch_ncbi.py --email your@email.com
+
+# Fetch a specific accession
+python fetch_ncbi.py --accessions NC_000913.3 --out-dir data/ecoli \
+                     --email your@email.com
+
+# Fetch multiple accessions
+python fetch_ncbi.py --accessions NC_000913.3 NC_002695.2 \
+                     --out-dir data/ --email your@email.com
+
+# Skip download if files already exist (idempotent)
+python fetch_ncbi.py --skip-existing --email your@email.com
+```
+
+### fetch_ncbi.py options
+
+```
+  --accessions ACC [ACC ...]   RefSeq accession(s) (default: NC_000913.3)
+  --out-dir DIR                Output directory    (default: data/ncbi)
+  --email EMAIL                NCBI email address  (required by NCBI policy)
+  --skip-existing              Skip if FASTA+GBK already present
+  --verbose / -v               Enable DEBUG logging
+```
+
+### Fetch outputs
+
+| File | Description |
+|------|-------------|
+| `<outdir>/<accession>.fna` | Nucleotide FASTA |
+| `<outdir>/<accession>.gbk` | Full GenBank annotation (with translations) |
+| `<outdir>/ncbi_manifest.json` | Download manifest (accession, paths, status) |
+
+---
+
+## Running the full test suite (`run_tests.py`)
+
+```bash
+# Run all built-in tests
+python run_tests.py --email your@email.com
+
+# Re-run without re-downloading (data already in tests/)
+python run_tests.py --skip-download
+
+# Run with gap-filling on M9 medium
+python run_tests.py --email your@email.com --gap-fill M9
+
+# Test a custom accession
+python run_tests.py --accessions NC_002695.2 --email your@email.com
+
+# Keep intermediate files (proteins.faa) after run
+python run_tests.py --keep-intermediates --email your@email.com
+```
+
+### run_tests.py options
+
+```
+  --accessions ACC [ACC ...]   Accession(s) to test (default: E. coli K-12 set)
+  --base-dir DIR               Root dir for test work dirs  (default: tests)
+  --email EMAIL                NCBI email for fetch_ncbi.py
+  --skip-download              Skip NCBI fetch if files exist
+  --gap-fill MEDIUM            CarveMe gap-fill medium (e.g. M9)
+  --keep-intermediates         Keep proteins.faa after each test
+  --report FILE                JSON report path  (default: tests/test_report.json)
+  --verbose / -v               Enable DEBUG logging
+```
+
+### Test outputs (per accession)
+
+```
+tests/
+└── NC_000913_3/
+    ├── NC_000913.3.fna          ← downloaded FASTA
+    ├── NC_000913.3.gbk          ← downloaded GenBank
+    ├── ncbi_manifest.json       ← download manifest
+    ├── pipeline.log             ← full pipeline log
+    └── output/
+        ├── model.xml            ← GSMM in SBML format
+        ├── proteins.faa         ← intermediate (deleted unless --keep-intermediates)
+        └── viz/
+            ├── summary_stats.png
+            ├── compartment_breakdown.png
+            ├── degree_distribution.png
+            ├── subsystem_barchart.png
+            ├── flux_distribution.png
+            ├── reaction_network.html
+            ├── dashboard.html
+            ├── escher_map.html
+            └── model_summary.csv
+tests/test_report.json           ← JSON pass/fail report
+```
+
+---
+
+## Input files (manual use)
 
 | File | Description |
 |------|-------------|
 | `genomics.fasta` | Genomic nucleotide or protein FASTA |
 | `genomics.gbk` | Annotated GenBank file (CDS features required) |
 
-Place both files in the project root (same directory as `generate_model.py`).
+Place both files in the project root (same directory as `generate_model.py`),
+or use `fetch_ncbi.py` to download them automatically.
 
 ---
 
-## Usage
+## Usage: pipeline only
 
 ### Minimal (default paths, no gap-filling)
 ```bash
@@ -128,8 +257,6 @@ All written to `output/viz/` by default (override with `--viz-dir`).
 
 ## Standalone visualization (existing model)
 
-You can also visualize any existing SBML model without re-running the full pipeline:
-
 ```bash
 python visualize_model.py --model output/model.xml --out-dir output/viz
 ```
@@ -170,3 +297,5 @@ print(model.summary())               # flux summary
 | Visualizations not generated | Ensure `--visualize` flag is passed and `visualize_model.py` is in the same directory |
 | `plotly` / `escher` not found | Re-create the conda env: `conda env create -f environment.yml` |
 | Escher map shows wrong organism | Supply your own Escher JSON map (see [escher docs](https://escher.readthedocs.io)) |
+| NCBI fetch times out / fails | NCBI rate-limits unauthenticated requests; set `--email` and retry |
+| `HTTP Error 429` during fetch | Wait a few minutes then re-run with `--skip-existing` |

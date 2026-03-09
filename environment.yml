@@ -6,7 +6,7 @@ channels:
 dependencies:
   - python=3.10
   - pip
-  # Sequence handling
+  # Sequence handling + NCBI access
   - biopython>=1.81
   # Alignment (required by CarveMe)
   - diamond>=2.1
@@ -26,3 +26,4 @@ dependencies:
       - plotly>=5.18         # interactive HTML charts
       - escher>=1.7.3        # interactive metabolic maps
       - kaleido>=0.2.1       # static export for plotly figures
+      - requests>=2.31       # HTTP fallback for NCBI downloads

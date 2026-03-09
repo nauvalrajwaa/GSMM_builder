@@ -1,0 +1,10 @@
+[
+  {
+    "accession": "NC_000913.3",
+    "fasta": "tests/NC_000913_3/NC_000913.3.fna",
+    "gbk": "tests/NC_000913_3/NC_000913.3.gbk",
+    "skipped": false,
+    "ok": true,
+    "error": null
+  }
+]

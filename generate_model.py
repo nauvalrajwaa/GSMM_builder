@@ -122,12 +122,15 @@ def run_carveme(
     log: logging.Logger,
 ) -> None:
     log.info("Running CarveMe reconstruction …")
-    cmd = ["carve", str(faa), "--output", str(output_xml)]
+    # Resolve carve binary relative to the current Python interpreter so it
+    # works regardless of whether the conda env bin dir is on PATH.
+    carve_bin = str(Path(sys.executable).parent / "carve")
+    cmd = [carve_bin, str(faa), "--output", str(output_xml)]
     if gap_fill:
         cmd += ["--gapfill", gap_fill]
 
     log.info("  Command: %s", " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ, "PATH": str(Path(sys.executable).parent) + ":" + os.environ.get("PATH", "")})
 
     if result.stdout:
         for line in result.stdout.splitlines():
@@ -162,7 +165,10 @@ def qc_model(xml_path: Path, log: logging.Logger) -> tuple:
     log.info("Running COBRApy quality checks …")
     try:
         import cobra
+        # Silence cobra's verbose 'Adding exchange reaction' / 'Ignoring reaction' messages
+        logging.getLogger("cobra").setLevel(logging.ERROR)
         model = cobra.io.read_sbml_model(str(xml_path))
+        logging.getLogger("cobra").setLevel(logging.WARNING)
     except Exception as exc:
         log.error("Failed to load SBML model: %s", exc)
         sys.exit(1)

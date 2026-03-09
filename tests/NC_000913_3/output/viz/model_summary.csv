@@ -1,0 +1,2 @@
+model_id,n_reactions,n_metabolites,n_genes,n_blocked,pct_blocked,n_subsystems,fba_objective,n_compartments,ko_genes_screened,ko_essential,ko_nonessential,ki_candidates,ki_growth_improving
+model,2885,1816,1655,17,0.59,0,141.477921,3,200,1,199,154,0

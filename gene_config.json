@@ -1,0 +1,32 @@
+{
+  "description": "Example gene manipulation experiment – E. coli K-12",
+  "knockouts": [
+    {
+      "gene_id": "b2215",
+      "note": "Highly-connected outer-membrane porin gene (292 reactions)"
+    },
+    {
+      "gene_id": "b3552",
+      "note": "Transport/membrane gene (65 reactions)"
+    }
+  ],
+  "knockins": [
+    {
+      "gene_id": "b3011",
+      "note": "Normally-silent gene – force activation of all its reactions",
+      "reactions": []
+    },
+    {
+      "gene_id": "b4034",
+      "note": "Open glucose uptake as a knockin rescue experiment",
+      "reactions": [
+        {
+          "reaction_id": "EX_glc__D_e",
+          "lower_bound": -10,
+          "upper_bound": 1000,
+          "note": "Allow glucose uptake at up to 10 mmol/gDW/h"
+        }
+      ]
+    }
+  ]
+}

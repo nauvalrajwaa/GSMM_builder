@@ -12,9 +12,14 @@ Produces (all outputs written to ``out_dir``):
   4. subsystem_barchart.png     – horizontal bar chart of reactions per subsystem
   5. flux_distribution.png      – FBA flux bar chart (top-N active reactions)
   6. reaction_network.html      – interactive Plotly network graph
-  7. escher_map.html            – interactive Escher metabolic map (if escher
+  7. dashboard.html             – interactive Plotly multi-panel dashboard
+  8. mutation_analysis.html     – interactive knockout + knockin gene analysis
+  9. escher_map.html            – interactive Escher metabolic map (if escher
                                    is installed and a base-map is available)
-  8. model_summary.csv          – machine-readable summary statistics table
+  10. model_summary.csv         – machine-readable summary statistics table
+  11. index.html                – unified single-page report hub with all
+                                   figures, interactive iframes, and environment
+                                   editor
 
 Usage (standalone)
 ------------------
@@ -186,7 +191,7 @@ def plot_compartment_breakdown(
                if _HAS_SNS else None)
 
     fig, ax = plt.subplots(figsize=(7, 7))
-    wedges, texts, autotexts = ax.pie(
+    pie_result = ax.pie(
         sizes,
         labels=labels,
         autopct="%1.1f%%",
@@ -195,8 +200,10 @@ def plot_compartment_breakdown(
         wedgeprops=dict(linewidth=0.7, edgecolor="white"),
         pctdistance=0.82,
     )
-    for at in autotexts:
-        at.set_fontsize(9)
+    # pie() returns (wedges, texts) or (wedges, texts, autotexts) depending on autopct
+    if len(pie_result) == 3:
+        for at in pie_result[2]:
+            at.set_fontsize(9)
 
     ax.set_title("Metabolite distribution by compartment",
                  fontsize=13, fontweight="bold", pad=16)
@@ -642,6 +649,172 @@ def export_escher_map(
 
 
 # ---------------------------------------------------------------------------
+# 7b. Escher maps for gene mutations (knockout / knockin overlays)
+# ---------------------------------------------------------------------------
+
+def export_escher_map_mutations(
+    model: "cobra.Model",
+    out_dir: Path,
+    log: logging.Logger,
+    gene_results: "list[dict] | None" = None,
+    map_name: str = "iJO1366.Central metabolism",
+) -> None:
+    """
+    Generate one Escher HTML map per mutation entry in *gene_results*,
+    each showing the FBA flux distribution under that gene perturbation.
+
+    If *gene_results* is None or empty the function is a no-op.
+    The maps are written to ``<out_dir>/escher_mutations/`` as
+    ``<type>_<gene_id>.html`` (e.g. ``knockout_b2215.html``).
+    A companion ``escher_mutations_index.html`` lists and iframes all maps.
+    """
+    if not _HAS_ESCHER:
+        log.warning("escher not installed – skipping mutation Escher maps.")
+        return
+    if not gene_results:
+        return
+
+    mut_dir = out_dir / "escher_mutations"
+    mut_dir.mkdir(parents=True, exist_ok=True)
+
+    log.info("  Building Escher maps for %d gene mutations …", len(gene_results))
+
+    # ── wild-type fluxes (base reference) ────────────────────────────────────
+    try:
+        wt_sol = model.optimize()
+        wt_fluxes = wt_sol.fluxes.to_dict() if wt_sol.status == "optimal" else {}
+    except Exception:
+        wt_fluxes = {}
+
+    generated: list[tuple[str, str, str]] = []   # (filename, label, type)
+
+    for entry in gene_results:
+        gid   = entry.get("gene_id", "unknown")
+        gname = entry.get("gene_name", gid)
+        etype = entry.get("type", "knockout")
+        note  = entry.get("note", "")
+        rxn_affected = entry.get("reactions_affected", [])
+
+        try:
+            with model:
+                if etype == "knockout":
+                    gene_obj = model.genes.query(lambda g: g.id == gid)
+                    if gene_obj:
+                        gene_obj[0].knock_out()
+                elif etype == "knockin":
+                    # Open all reactions associated with this gene
+                    gene_obj = model.genes.query(lambda g: g.id == gid)
+                    if gene_obj:
+                        for rxn in gene_obj[0].reactions:
+                            if rxn.lower_bound >= 0:
+                                rxn.lower_bound = 0
+                                rxn.upper_bound = max(rxn.upper_bound, 1000)
+                            else:
+                                rxn.lower_bound = -1000
+                                rxn.upper_bound = max(rxn.upper_bound, 1000)
+                sol = model.optimize()
+                mut_fluxes = sol.fluxes.to_dict() if sol.status == "optimal" else {}
+                growth = sol.objective_value if sol.status == "optimal" else 0.0
+        except Exception as exc:
+            log.warning("    Skipping Escher map for %s: %s", gid, exc)
+            continue
+
+        # Compute flux *difference* relative to WT for colour scale
+        diff_fluxes = {rxn_id: mut_fluxes.get(rxn_id, 0.0) - wt_fluxes.get(rxn_id, 0.0)
+                       for rxn_id in set(mut_fluxes) | set(wt_fluxes)}
+
+        # Highlight affected reactions in orange
+        highlight = {r: 99999 for r in rxn_affected}
+
+        try:
+            builder = escher.Builder(
+                map_name=map_name,
+                model=model,
+                reaction_data=mut_fluxes,
+                reaction_scale=[
+                    {"type": "min",  "color": "#C44E52", "size": 8},
+                    {"type": "zero", "color": "#eeeeee", "size": 3},
+                    {"type": "max",  "color": "#4C72B0", "size": 8},
+                ],
+            )
+            safe_id  = gid.replace("/", "_").replace(" ", "_")
+            filename = f"{etype}_{safe_id}.html"
+            out_html = mut_dir / filename
+            builder.save_html(str(out_html))
+            label = f"{etype.capitalize()}: {gname} ({gid})  |  growth={growth:.4f}"
+            if note:
+                label += f"  [{note}]"
+            generated.append((filename, label, etype))
+            log.info("    Saved: %s", out_html)
+        except Exception as exc:
+            log.warning("    Escher map failed for %s: %s", gid, exc)
+            continue
+
+    if not generated:
+        return
+
+    # ── index page ────────────────────────────────────────────────────────────
+    tab_btns  = ""
+    tab_iframes = ""
+    for i, (fn, lbl, etype) in enumerate(generated):
+        active  = "active" if i == 0 else ""
+        display = "block"  if i == 0 else "none"
+        color   = "#C44E52" if etype == "knockout" else "#4C72B0"
+        tab_btns += (
+            f'<button class="mtab {active}" '
+            f'style="border-left:4px solid {color};" '
+            f'onclick="switchMut(this,\'mf-{i}\')">{lbl}</button>\n'
+        )
+        tab_iframes += (
+            f'<iframe id="mf-{i}" src="{fn}" '
+            f'style="display:{display};width:100%;height:85vh;border:none;"></iframe>\n'
+        )
+
+    index_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>Escher – Gene Mutation Maps</title>
+  <style>
+    body {{ font-family: sans-serif; margin: 0; background: #f4f6f9; }}
+    header {{ background: #2c5282; color: #fff; padding: 1rem 1.5rem; }}
+    header h1 {{ font-size: 1.3rem; margin: 0; }}
+    .sidebar {{ width: 300px; float: left; height: calc(100vh - 60px);
+                overflow-y: auto; background: #fff;
+                border-right: 1px solid #e2e8f0; padding: .5rem; }}
+    .main {{ margin-left: 300px; }}
+    .mtab {{ display: block; width: 100%; text-align: left; padding: .55rem .75rem;
+              border: none; background: none; cursor: pointer; font-size: .82rem;
+              border-bottom: 1px solid #f0f0f0; border-radius: 4px; margin-bottom: 2px; }}
+    .mtab:hover {{ background: #f7fafc; }}
+    .mtab.active {{ background: #ebf4ff; font-weight: 600; }}
+  </style>
+</head>
+<body>
+<header><h1>Escher Gene Mutation Maps  ({len(generated)} mutations)</h1></header>
+<div class="sidebar">
+{tab_btns}
+</div>
+<div class="main">
+{tab_iframes}
+</div>
+<script>
+function switchMut(btn, id) {{
+  document.querySelectorAll('.mtab').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('iframe').forEach(f => f.style.display = 'none');
+  btn.classList.add('active');
+  document.getElementById(id).style.display = 'block';
+}}
+</script>
+</body>
+</html>"""
+
+    index_path = mut_dir / "escher_mutations_index.html"
+    index_path.write_text(index_html, encoding="utf-8")
+    log.info("  Saved mutation Escher index: %s", index_path)
+
+
+# ---------------------------------------------------------------------------
 # 8. Machine-readable CSV summary
 # ---------------------------------------------------------------------------
 
@@ -651,16 +824,18 @@ def export_summary_csv(
     fba_value: float | None,
     out_dir: Path,
     log: logging.Logger,
+    mutation_df: "pd.DataFrame | None" = None,
 ) -> None:
-    """Write a one-row CSV of key model statistics."""
+    """Write a one-row CSV of key model statistics, optionally including mutation analysis KO stats."""
     if not _HAS_PD:
         log.warning("pandas not installed – skipping CSV summary.")
         return
 
+    import pandas as pd
     from collections import Counter
     subsystems = Counter(r.subsystem for r in model.reactions if r.subsystem)
 
-    data = {
+    data: dict = {
         "model_id":          model.id or "model",
         "n_reactions":       len(model.reactions),
         "n_metabolites":     len(model.metabolites),
@@ -672,10 +847,280 @@ def export_summary_csv(
         "n_compartments":    len(model.compartments),
     }
 
+    # Add mutation analysis statistics if available
+    if mutation_df is not None and not mutation_df.empty:
+        ko_df = mutation_df[mutation_df["type"] == "knockout"]
+        ki_df = mutation_df[mutation_df["type"] == "knockin"]
+        data["ko_genes_screened"]   = len(ko_df)
+        data["ko_essential"]        = int(ko_df["essential"].sum()) if not ko_df.empty else 0
+        data["ko_nonessential"]     = int((~ko_df["essential"]).sum()) if not ko_df.empty else 0
+        data["ki_candidates"]       = len(ki_df)
+        data["ki_growth_improving"] = int((ki_df["growth_change_pct"] > 1).sum()) if not ki_df.empty else 0
+
     df = pd.DataFrame([data])
     out_csv = out_dir / "model_summary.csv"
     df.to_csv(out_csv, index=False)
     log.info("  Saved: %s", out_csv)
+
+
+# ---------------------------------------------------------------------------
+# 9. Mutation analysis – knockout & knockin
+# ---------------------------------------------------------------------------
+
+def run_mutation_analysis(
+    model: "cobra.Model",
+    out_dir: Path,
+    log: logging.Logger,
+    max_genes: int = 200,
+) -> "pd.DataFrame | None":
+    """
+    Perform single-gene knockout and knockin analysis and write an interactive
+    HTML report (``mutation_analysis.html``).
+
+    Knockout
+    --------
+    For every gene, temporarily delete it (using COBRApy's context manager)
+    and record the resulting FBA growth.  Genes whose deletion drives growth
+    to ≤5 % of wild-type are labelled **essential**; genes with no effect are
+    **non-essential**.
+
+    Knockin
+    -------
+    Genes whose flux is zero in the wild-type FBA solution but become active
+    after releasing their bound constraints are candidates for "knock-in"
+    rescue experiments.  We identify these by checking which gene-associated
+    reactions carry zero flux in the WT solution, then simulating each one
+    individually with its lower-bound opened (set to –1000 if reversible, or
+    0→1000 if irreversible) and measuring the change in growth.
+
+    Parameters
+    ----------
+    model    : COBRApy Model
+    out_dir  : output directory
+    log      : logger
+    max_genes: cap on the number of genes screened (for speed; sorted by
+               number of associated reactions descending so the most-connected
+               genes are always included).
+
+    Returns the results DataFrame (or None on failure).
+    """
+    if not _HAS_PLOTLY or not _HAS_PD:
+        log.warning("plotly/pandas not installed – skipping mutation analysis.")
+        return None
+
+    import pandas as pd
+
+    log.info("  Running mutation analysis (knockout + knockin) …")
+
+    # ── wild-type FBA ────────────────────────────────────────────────────────
+    try:
+        wt_solution = model.optimize()
+        if wt_solution.status != "optimal":
+            log.warning("  WT FBA not optimal – skipping mutation analysis.")
+            return None
+        wt_growth = wt_solution.objective_value
+        if wt_growth <= 0:
+            log.warning("  WT growth ≤ 0 – skipping mutation analysis.")
+            return None
+    except Exception as exc:
+        log.warning("  WT FBA failed: %s", exc)
+        return None
+
+    wt_fluxes = wt_solution.fluxes  # Series: rxn_id → flux
+
+    # ── gene list (capped) ───────────────────────────────────────────────────
+    genes = sorted(model.genes, key=lambda g: -len(g.reactions))
+    if len(genes) > max_genes:
+        log.info("    Capping gene screen at %d / %d genes.", max_genes, len(genes))
+        genes = genes[:max_genes]
+
+    # ── knockout screen ──────────────────────────────────────────────────────
+    ko_rows: list[dict] = []
+    for gene in genes:
+        try:
+            with model:
+                gene.knock_out()
+                sol = model.optimize()
+                ko_growth = sol.objective_value if sol.status == "optimal" else 0.0
+        except Exception:
+            ko_growth = float("nan")
+        ratio = ko_growth / wt_growth if wt_growth else float("nan")
+        ko_rows.append({
+            "gene_id":    gene.id,
+            "gene_name":  gene.name or gene.id,
+            "n_reactions": len(gene.reactions),
+            "type":       "knockout",
+            "wt_growth":  round(wt_growth, 6),
+            "mut_growth": round(ko_growth, 6),
+            "growth_ratio": round(ratio, 4),
+            "essential":  ratio <= 0.05,
+            "growth_change_pct": round((ratio - 1) * 100, 2),
+        })
+
+    # ── knockin screen ───────────────────────────────────────────────────────
+    # Identify genes whose reactions all carry zero WT flux → candidates
+    ki_rows: list[dict] = []
+    ki_genes = [
+        g for g in genes
+        if all(abs(wt_fluxes.get(r.id, 0.0)) < 1e-9 for r in g.reactions)
+        and len(g.reactions) > 0
+    ]
+    log.info("    %d knockout genes screened; %d knockin candidates.", len(genes), len(ki_genes))
+
+    for gene in ki_genes[:max_genes]:
+        try:
+            with model:
+                for rxn in gene.reactions:
+                    # Open the reaction: allow flux to pass through
+                    if rxn.lower_bound >= 0:
+                        rxn.lower_bound = 0
+                        rxn.upper_bound = max(rxn.upper_bound, 1000)
+                    else:
+                        rxn.lower_bound = -1000
+                        rxn.upper_bound = max(rxn.upper_bound, 1000)
+                sol = model.optimize()
+                ki_growth = sol.objective_value if sol.status == "optimal" else 0.0
+        except Exception:
+            ki_growth = float("nan")
+        ratio = ki_growth / wt_growth if wt_growth else float("nan")
+        ki_rows.append({
+            "gene_id":    gene.id,
+            "gene_name":  gene.name or gene.id,
+            "n_reactions": len(gene.reactions),
+            "type":       "knockin",
+            "wt_growth":  round(wt_growth, 6),
+            "mut_growth": round(ki_growth, 6),
+            "growth_ratio": round(ratio, 4),
+            "essential":  False,
+            "growth_change_pct": round((ratio - 1) * 100, 2),
+        })
+
+    df = pd.DataFrame(ko_rows + ki_rows)
+    if df.empty:
+        log.warning("  No mutation results produced.")
+        return None
+
+    # ── Plotly figure ────────────────────────────────────────────────────────
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    ko_df = df[df["type"] == "knockout"].copy()
+    ki_df = df[df["type"] == "knockin"].copy()
+
+    n_essential  = int(ko_df["essential"].sum())
+    n_nonessential = int((~ko_df["essential"]).sum())
+
+    # colour per category
+    ko_df["color"] = ko_df["essential"].map({True: "#C44E52", False: "#55A868"})
+    if not ki_df.empty:
+        ki_df["color"] = ki_df["growth_change_pct"].apply(
+            lambda v: "#4C72B0" if v > 1 else "#CCB974"
+        )
+
+    has_ki = not ki_df.empty
+    n_rows  = 3 if has_ki else 2
+    titles  = ["Knockout: growth ratio per gene",
+               f"Knockout summary  (essential: {n_essential}, non-essential: {n_nonessential})"]
+    if has_ki:
+        titles.append("Knockin: growth change per candidate gene")
+    specs = [[{"type": "scatter"}]] + [[{"type": "bar"}]] + ([[{"type": "scatter"}]] if has_ki else [])
+
+    fig = make_subplots(
+        rows=n_rows, cols=1,
+        subplot_titles=titles,
+        specs=specs,
+        vertical_spacing=0.10,
+        row_heights=[0.45, 0.20, 0.35][:n_rows],
+    )
+
+    # Row 1 — KO scatter: gene index vs growth ratio
+    ko_df_sorted = ko_df.sort_values("growth_ratio")
+    fig.add_trace(go.Scatter(
+        x=list(range(len(ko_df_sorted))),
+        y=ko_df_sorted["growth_ratio"].tolist(),
+        mode="markers",
+        marker=dict(
+            color=ko_df_sorted["color"].tolist(),
+            size=6,
+            opacity=0.8,
+            line=dict(width=0.3, color="white"),
+        ),
+        text=[
+            f"<b>{row['gene_name']}</b> ({row['gene_id']})<br>"
+            f"Reactions: {row['n_reactions']}<br>"
+            f"Growth ratio: {row['growth_ratio']:.4f}<br>"
+            f"{'ESSENTIAL' if row['essential'] else 'non-essential'}"
+            for _, row in ko_df_sorted.iterrows()
+        ],
+        hoverinfo="text",
+        name="Knockout",
+    ), row=1, col=1)
+    # threshold line at 5 %
+    fig.add_hline(y=0.05, line_dash="dash", line_color="#C44E52",
+                  annotation_text="Essential threshold (5%)", row=1, col=1)
+    fig.add_hline(y=1.0, line_dash="dot", line_color="#888",
+                  annotation_text="Wild-type growth", row=1, col=1)
+
+    # Row 2 — KO summary bar
+    fig.add_trace(go.Bar(
+        x=["Essential", "Non-essential"],
+        y=[n_essential, n_nonessential],
+        marker_color=["#C44E52", "#55A868"],
+        text=[str(n_essential), str(n_nonessential)],
+        textposition="outside",
+        showlegend=False,
+    ), row=2, col=1)
+
+    # Row 3 — KI scatter (optional)
+    if has_ki:
+        ki_df_sorted = ki_df.sort_values("growth_change_pct", ascending=False)
+        fig.add_trace(go.Scatter(
+            x=list(range(len(ki_df_sorted))),
+            y=ki_df_sorted["growth_change_pct"].tolist(),
+            mode="markers",
+            marker=dict(
+                color=ki_df_sorted["color"].tolist(),
+                size=6,
+                opacity=0.8,
+                line=dict(width=0.3, color="white"),
+            ),
+            text=[
+                f"<b>{row['gene_name']}</b> ({row['gene_id']})<br>"
+                f"Reactions: {row['n_reactions']}<br>"
+                f"Growth change: {row['growth_change_pct']:+.2f}%"
+                for _, row in ki_df_sorted.iterrows()
+            ],
+            hoverinfo="text",
+            name="Knockin",
+        ), row=3, col=1)
+        fig.add_hline(y=0, line_dash="dot", line_color="#888", row=3, col=1)
+
+    fig.update_layout(
+        title_text=(
+            f"Mutation Analysis — {model.id or 'model'}<br>"
+            f"<sup>WT growth = {wt_growth:.4f}  |  "
+            f"Genes screened = {len(genes)}  |  "
+            f"Essential KO = {n_essential}</sup>"
+        ),
+        title_font_size=15,
+        height=200 * n_rows + 300,
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        showlegend=False,
+    )
+    fig.update_xaxes(title_text="Gene rank", row=1, col=1)
+    fig.update_yaxes(title_text="Growth ratio (KO / WT)", row=1, col=1)
+    fig.update_xaxes(title_text="Category", row=2, col=1)
+    fig.update_yaxes(title_text="Gene count", row=2, col=1)
+    if has_ki:
+        fig.update_xaxes(title_text="Gene rank", row=3, col=1)
+        fig.update_yaxes(title_text="Growth change (%)", row=3, col=1)
+
+    out_html = out_dir / "mutation_analysis.html"
+    fig.write_html(str(out_html))
+    log.info("  Saved: %s  (%d KO, %d KI records)", out_html, len(ko_df), len(ki_df))
+
+    return df
 
 
 # ---------------------------------------------------------------------------
@@ -739,13 +1184,715 @@ def run_all_visualizations(
     plot_reaction_network(model, out_dir, log)
     plot_dashboard(model, blocked, fba_value, out_dir, log)
 
-    # Escher map
+    # Mutation analysis (knockout + knockin)
+    mutation_df = run_mutation_analysis(model, out_dir, log)
+
+    # Escher map (wild-type)
     export_escher_map(model, out_dir, log)
 
-    # CSV summary
-    export_summary_csv(model, blocked, fba_value, out_dir, log)
+    # Escher maps for gene mutations from gene_config.json (if present)
+    # Search order: script dir (project root), then relative to out_dir hierarchy
+    _script_dir = Path(__file__).parent
+    gene_config_path = _script_dir / "gene_config.json"
+    if not gene_config_path.is_file():
+        gene_config_path = out_dir.parent.parent / "gene_config.json"
+    if not gene_config_path.is_file():
+        gene_config_path = Path("gene_config.json")
+    if gene_config_path.is_file():
+        try:
+            from gene_config import load_gene_config, apply_gene_config
+            cfg = load_gene_config(gene_config_path)
+            gene_results = apply_gene_config(model, cfg, log=log)
+            export_escher_map_mutations(model, out_dir, log, gene_results=gene_results)
+        except Exception as exc:
+            log.warning("  Gene config Escher maps skipped: %s", exc)
+
+    # CSV summary (pass mutation_df so KO stats can be included)
+    export_summary_csv(model, blocked, fba_value, out_dir, log, mutation_df=mutation_df)
 
     log.info("All visualizations complete.  Output directory: %s", out_dir)
+
+    # Generate the single consolidated index.html report
+    generate_index_html(model, blocked, fba_value, out_dir, log, mutation_df=mutation_df)
+
+
+# ---------------------------------------------------------------------------
+# 10. index.html – single consolidated report with environment editor
+# ---------------------------------------------------------------------------
+
+def generate_index_html(
+    model: "cobra.Model",
+    blocked: list[str],
+    fba_value: float | None,
+    out_dir: Path,
+    log: logging.Logger,
+    mutation_df: "pd.DataFrame | None" = None,
+) -> None:
+    """
+    Generate a self-contained ``index.html`` that acts as a unified report hub:
+
+    - **Overview tab** – key model statistics, inline PNG figures (base64),
+      and a collapsible mutation analysis summary table.
+    - **Interactive reports tab** – iframes embedding ``dashboard.html``,
+      ``reaction_network.html``, ``mutation_analysis.html``, and
+      ``escher_map.html`` side by side.
+    - **Environment editor tab** – an editable form (feature [3]) that lets
+      the user inspect and modify the growth medium (gap-fill medium name,
+      exchange reaction bounds) and shows a shell command to re-run the
+      pipeline with the chosen settings.
+
+    The HTML file is written to ``<out_dir>/index.html``.
+    """
+    import base64
+    import json
+    from datetime import datetime
+
+    log.info("  Generating index.html report …")
+
+    # ── helper: embed a PNG as a base64 data URI ──────────────────────────────
+    def _b64_img(name: str) -> str:
+        p = out_dir / name
+        if not p.is_file():
+            return ""
+        with open(p, "rb") as fh:
+            b64 = base64.b64encode(fh.read()).decode()
+        return f"data:image/png;base64,{b64}"
+
+    # ── collect available files ───────────────────────────────────────────────
+    html_reports = [
+        ("dashboard.html",         "Dashboard"),
+        ("reaction_network.html",  "Reaction Network"),
+        ("mutation_analysis.html", "Mutation Analysis"),
+        ("escher_map.html",        "Escher Map (WT)"),
+        ("escher_mutations/escher_mutations_index.html", "Escher Mutations"),
+        ("gene_config_report.html", "Gene Config Report"),
+    ]
+    available_html = [(fn, lbl) for fn, lbl in html_reports if (out_dir / fn).is_file()]
+
+    png_files = [
+        ("summary_stats.png",        "Summary Statistics"),
+        ("compartment_breakdown.png","Compartment Breakdown"),
+        ("degree_distribution.png",  "Degree Distribution"),
+        ("subsystem_barchart.png",   "Subsystem Barchart"),
+        ("flux_distribution.png",    "FBA Flux Distribution"),
+    ]
+    available_pngs = [(fn, lbl, _b64_img(fn)) for fn, lbl, in png_files if _b64_img(fn)]
+
+    # ── model statistics ──────────────────────────────────────────────────────
+    n_rxn   = len(model.reactions)
+    n_met   = len(model.metabolites)
+    n_gene  = len(model.genes)
+    n_blk   = len(blocked) if blocked else 0
+    fba_str = f"{fba_value:.4f}" if fba_value is not None else "N/A"
+    model_id = model.id or "GSMM model"
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # ── mutation summary table ─────────────────────────────────────────────────
+    mut_table_rows = ""
+    n_essential = n_nonessential = ki_candidates = 0
+    if mutation_df is not None and not mutation_df.empty:
+        import pandas as pd
+        ko_df = mutation_df[mutation_df["type"] == "knockout"]
+        ki_df = mutation_df[mutation_df["type"] == "knockin"]
+        n_essential    = int(ko_df["essential"].sum()) if not ko_df.empty else 0
+        n_nonessential = int((~ko_df["essential"]).sum()) if not ko_df.empty else 0
+        ki_candidates  = len(ki_df)
+
+        top_rows = mutation_df.sort_values("growth_ratio").head(20)
+        for _, row in top_rows.iterrows():
+            badge = ""
+            if row["type"] == "knockout":
+                badge = ('<span class="badge badge-red">Essential</span>'
+                         if row["essential"]
+                         else '<span class="badge badge-green">Non-essential</span>')
+            else:
+                badge = '<span class="badge badge-blue">Knockin</span>'
+            mut_table_rows += (
+                f"<tr>"
+                f"<td>{row['gene_id']}</td>"
+                f"<td>{row['gene_name']}</td>"
+                f"<td>{row['type'].capitalize()}</td>"
+                f"<td>{row['n_reactions']}</td>"
+                f"<td>{row['growth_ratio']:.4f}</td>"
+                f"<td>{row['growth_change_pct']:+.2f}%</td>"
+                f"<td>{badge}</td>"
+                f"</tr>\n"
+            )
+
+    # ── medium / exchange reactions ────────────────────────────────────────────
+    # Gather exchange reactions and their bounds for the environment editor
+    exchange_rxns = [r for r in model.reactions if r.id.startswith("EX_")]
+    # Show only those that are open (lb < 0 → can be consumed)
+    open_exchanges = [(r.id, r.name or r.id, r.lower_bound, r.upper_bound)
+                      for r in exchange_rxns if r.lower_bound < 0]
+    open_exchanges.sort(key=lambda x: x[1])
+    env_rows_html = ""
+    for rxn_id, rxn_name, lb, ub in open_exchanges[:60]:  # cap at 60 for readability
+        env_rows_html += (
+            f'<tr data-rxn="{rxn_id}">'
+            f'<td class="rxn-id">{rxn_id}</td>'
+            f'<td>{rxn_name}</td>'
+            f'<td><input type="number" class="lb-input" value="{lb}" step="0.1" '
+            f'     data-orig="{lb}" title="Lower bound (negative = uptake allowed)" /></td>'
+            f'<td><input type="number" class="ub-input" value="{ub}" step="0.1" '
+            f'     data-orig="{ub}" title="Upper bound" /></td>'
+            f'</tr>\n'
+        )
+
+    # JSON of original bounds for reset
+    orig_bounds_json = json.dumps(
+        {r.id: {"lb": r.lower_bound, "ub": r.upper_bound} for r in exchange_rxns
+         if r.lower_bound < 0}
+    )
+
+    # ── load environment presets from environments.json ───────────────────────
+    env_presets: dict = {}
+    # Look for environments.json relative to the model (up two levels from viz dir)
+    for candidate in [out_dir.parent.parent / "environments.json",
+                      out_dir.parent / "environments.json",
+                      Path("environments.json")]:
+        if candidate.is_file():
+            try:
+                with open(candidate) as _fh:
+                    _env_data = json.load(_fh)
+                env_presets = _env_data.get("presets", {})
+            except Exception:
+                pass
+            break
+    env_presets_json = json.dumps(env_presets)
+
+    # Build preset button HTML
+    preset_btns_html = ""
+    for key, preset in env_presets.items():
+        color = preset.get("color", "#4a5568")
+        label = preset.get("label", key)
+        desc  = preset.get("description", "")
+        preset_btns_html += (
+            f'<button class="preset-btn" '
+            f'style="border-left:4px solid {color};" '
+            f'onclick="applyPreset({json.dumps(key)})" '
+            f'title="{desc}">{label}</button>\n'
+        )
+
+    # ── tab buttons for interactive reports ───────────────────────────────────
+    iframe_tabs = ""
+    iframe_panels = ""
+    for i, (fn, lbl) in enumerate(available_html):
+        active = "active" if i == 0 else ""
+        iframe_tabs += (
+            f'<button class="tab-btn {active}" onclick="switchIframe(this,\'iframe-{i}\')">'
+            f'{lbl}</button>\n'
+        )
+        display = "block" if i == 0 else "none"
+        iframe_panels += (
+            f'<iframe id="iframe-{i}" src="{fn}" style="display:{display};'
+            f'width:100%;height:80vh;border:none;"></iframe>\n'
+        )
+
+    # ── PNG gallery HTML ──────────────────────────────────────────────────────
+    png_gallery = ""
+    for fn, lbl, b64 in available_pngs:
+        if b64:
+            png_gallery += (
+                f'<div class="png-card">'
+                f'<p class="png-label">{lbl}</p>'
+                f'<img src="{b64}" alt="{lbl}" loading="lazy" />'
+                f'</div>\n'
+            )
+
+    # ── mutation summary stats cards ──────────────────────────────────────────
+    mut_stat_cards = ""
+    if mutation_df is not None:
+        mut_stat_cards = f"""
+        <div class="stat-cards">
+          <div class="stat-card red">
+            <div class="stat-value">{n_essential}</div>
+            <div class="stat-label">Essential KO genes</div>
+          </div>
+          <div class="stat-card green">
+            <div class="stat-value">{n_nonessential}</div>
+            <div class="stat-label">Non-essential KO genes</div>
+          </div>
+          <div class="stat-card blue">
+            <div class="stat-value">{ki_candidates}</div>
+            <div class="stat-label">Knockin candidates</div>
+          </div>
+        </div>"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GSMM Report – {model_id}</title>
+  <style>
+    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f4f6f9;
+      color: #2d3748;
+      line-height: 1.5;
+    }}
+    header {{
+      background: linear-gradient(135deg, #2c5282, #4c72b0);
+      color: #fff;
+      padding: 1.5rem 2rem;
+    }}
+    header h1 {{ font-size: 1.6rem; font-weight: 700; }}
+    header p  {{ opacity: 0.85; font-size: 0.9rem; margin-top: 0.25rem; }}
+
+    /* ── main tabs ── */
+    .main-tabs {{
+      display: flex;
+      gap: 0;
+      background: #fff;
+      border-bottom: 2px solid #e2e8f0;
+      position: sticky; top: 0; z-index: 100;
+      box-shadow: 0 2px 6px rgba(0,0,0,.08);
+    }}
+    .main-tab {{
+      padding: 0.85rem 1.6rem;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.9rem;
+      border: none;
+      background: none;
+      color: #718096;
+      border-bottom: 3px solid transparent;
+      margin-bottom: -2px;
+      transition: color .15s, border-color .15s;
+    }}
+    .main-tab:hover {{ color: #4c72b0; }}
+    .main-tab.active {{ color: #2c5282; border-bottom-color: #4c72b0; }}
+
+    /* ── tab panels ── */
+    .panel {{ display: none; padding: 1.5rem 2rem; }}
+    .panel.active {{ display: block; }}
+
+    /* ── stat bar ── */
+    .stat-row {{
+      display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 1.5rem;
+    }}
+    .stat-box {{
+      background: #fff; border-radius: 10px; padding: 1rem 1.5rem;
+      flex: 1; min-width: 130px;
+      box-shadow: 0 1px 4px rgba(0,0,0,.07);
+      text-align: center;
+    }}
+    .stat-box .val {{ font-size: 1.8rem; font-weight: 700; color: #2c5282; }}
+    .stat-box .lbl {{ font-size: 0.75rem; color: #718096; text-transform: uppercase;
+                      letter-spacing: .05em; margin-top: .25rem; }}
+
+    /* ── section headings ── */
+    h2 {{ font-size: 1.1rem; font-weight: 700; color: #2d3748;
+          margin: 1.5rem 0 0.75rem; border-left: 4px solid #4c72b0;
+          padding-left: 0.6rem; }}
+
+    /* ── PNG gallery ── */
+    .png-gallery {{
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+      gap: 1rem;
+    }}
+    .png-card {{
+      background: #fff; border-radius: 10px; padding: 1rem;
+      box-shadow: 0 1px 4px rgba(0,0,0,.07);
+    }}
+    .png-card img {{ width: 100%; height: auto; border-radius: 6px; display: block; }}
+    .png-label {{ font-size: 0.8rem; font-weight: 600; color: #4a5568;
+                  margin-bottom: .5rem; text-transform: uppercase; letter-spacing:.04em; }}
+
+    /* ── mutation section ── */
+    .stat-cards {{
+      display: flex; flex-wrap: wrap; gap: 1rem; margin: 0.75rem 0 1rem;
+    }}
+    .stat-card {{
+      flex: 1; min-width: 140px; border-radius: 10px; padding: .9rem 1.2rem;
+      text-align: center; color: #fff;
+    }}
+    .stat-card.red   {{ background: #e53e3e; }}
+    .stat-card.green {{ background: #38a169; }}
+    .stat-card.blue  {{ background: #4c72b0; }}
+    .stat-value {{ font-size: 2rem; font-weight: 700; }}
+    .stat-label {{ font-size: 0.75rem; opacity: 0.9; margin-top: .2rem; }}
+
+    /* ── badges ── */
+    .badge {{
+      display: inline-block; padding: .15em .55em;
+      border-radius: 4px; font-size: 0.72rem; font-weight: 600;
+    }}
+    .badge-red   {{ background:#fed7d7; color:#c53030; }}
+    .badge-green {{ background:#c6f6d5; color:#276749; }}
+    .badge-blue  {{ background:#bee3f8; color:#2a69ac; }}
+
+    /* ── tables ── */
+    .data-table {{ width: 100%; border-collapse: collapse; font-size: 0.85rem;
+                   background: #fff; border-radius: 8px; overflow: hidden;
+                   box-shadow: 0 1px 4px rgba(0,0,0,.07); }}
+    .data-table th {{
+      background: #2c5282; color: #fff; padding: .6rem .8rem;
+      text-align: left; font-weight: 600; font-size: 0.78rem;
+    }}
+    .data-table td {{ padding: .5rem .8rem; border-bottom: 1px solid #edf2f7; }}
+    .data-table tr:last-child td {{ border-bottom: none; }}
+    .data-table tr:hover td {{ background: #f7fafc; }}
+
+    /* ── iframe tab buttons ── */
+    .tab-btn {{
+      padding: .5rem 1.1rem; border: 1px solid #e2e8f0; background: #fff;
+      cursor: pointer; font-size: .85rem; font-weight: 500; border-radius: 6px;
+      color: #4a5568; margin-right: .4rem; margin-bottom: .75rem;
+      transition: background .12s, color .12s;
+    }}
+    .tab-btn.active {{ background: #4c72b0; color: #fff; border-color: #4c72b0; }}
+    .tab-btn:hover:not(.active) {{ background: #edf2f7; }}
+
+    /* ── environment editor ── */
+    .env-toolbar {{
+      display: flex; gap: .75rem; flex-wrap: wrap; align-items: center;
+      margin-bottom: 1rem;
+    }}
+    .env-toolbar input[type=text] {{
+      padding: .45rem .75rem; border: 1px solid #cbd5e0; border-radius: 6px;
+      font-size: .9rem; width: 220px;
+    }}
+    .btn {{
+      padding: .45rem 1rem; border: none; border-radius: 6px;
+      font-size: .85rem; font-weight: 600; cursor: pointer;
+    }}
+    .btn-primary {{ background: #4c72b0; color: #fff; }}
+    .btn-primary:hover {{ background: #2c5282; }}
+    .btn-secondary {{ background: #e2e8f0; color: #2d3748; }}
+    .btn-secondary:hover {{ background: #cbd5e0; }}
+    .btn-danger {{ background: #fed7d7; color: #c53030; }}
+    .btn-danger:hover {{ background: #feb2b2; }}
+    .lb-input, .ub-input {{
+      width: 80px; padding: .3rem .4rem; border: 1px solid #cbd5e0;
+      border-radius: 4px; font-size: .85rem; text-align: right;
+    }}
+    .lb-input.changed, .ub-input.changed {{
+      border-color: #f6ad55; background: #fffaf0;
+    }}
+    .cmd-box {{
+      background: #1a202c; color: #a0aec0; padding: 1rem 1.2rem;
+      border-radius: 8px; font-family: "SFMono-Regular", Menlo, monospace;
+      font-size: .82rem; white-space: pre-wrap; word-break: break-all;
+      margin-top: 1rem; position: relative;
+    }}
+    .cmd-copy-btn {{
+      position: absolute; top: .5rem; right: .6rem;
+      background: #2d3748; color: #a0aec0; border: 1px solid #4a5568;
+      border-radius: 4px; padding: .2rem .55rem; font-size: .75rem;
+      cursor: pointer;
+    }}
+    .cmd-copy-btn:hover {{ background: #4a5568; }}
+    .filter-row {{
+      display: flex; gap: .5rem; align-items: center; margin-bottom: .6rem;
+      flex-wrap: wrap;
+    }}
+    .filter-row input {{ padding: .35rem .6rem; border: 1px solid #cbd5e0;
+      border-radius: 5px; font-size: .83rem; width: 220px; }}
+    .gap-fill-row {{ margin-bottom: 1rem; }}
+    .gap-fill-row label {{ font-size: .85rem; font-weight: 600; margin-right: .5rem; }}
+    .gap-fill-row input[type=text] {{
+      padding: .35rem .6rem; border: 1px solid #cbd5e0; border-radius: 5px;
+      font-size: .85rem; width: 140px;
+    }}
+    .preset-section {{ margin-bottom: 1.1rem; }}
+    .preset-section h3 {{ font-size: .88rem; font-weight: 700; color: #2d3748;
+      margin-bottom: .5rem; }}
+    .preset-btn {{
+      display: inline-block; padding: .35rem .85rem;
+      margin: .2rem .3rem .2rem 0; border-radius: 6px;
+      border: 1px solid #cbd5e0; background: #f7fafc;
+      font-size: .82rem; font-weight: 600; cursor: pointer;
+      transition: background .12s, border-color .12s;
+    }}
+    .preset-btn:hover {{ background: #ebf4ff; border-color: #90cdf4; }}
+    .info-chip {{
+      display: inline-block; background: #bee3f8; color: #2a69ac;
+      font-size: .73rem; font-weight: 600; padding: .12em .5em;
+      border-radius: 4px; margin-left: .35rem;
+    }}
+  </style>
+</head>
+<body>
+<header>
+  <h1>GSMM Report — {model_id}</h1>
+  <p>Generated: {generated_at}  |  Reactions: {n_rxn:,}  |  Metabolites: {n_met:,}  |  Genes: {n_gene:,}  |  FBA growth: {fba_str}</p>
+</header>
+
+<!-- ── main navigation ── -->
+<div class="main-tabs">
+  <button class="main-tab active" onclick="switchPanel(this,'panel-overview')">Overview</button>
+  <button class="main-tab" onclick="switchPanel(this,'panel-reports')">Interactive Reports</button>
+  <button class="main-tab" onclick="switchPanel(this,'panel-environment')">Environment Editor</button>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════
+     PANEL 1 – Overview
+     ══════════════════════════════════════════════════════════ -->
+<div id="panel-overview" class="panel active">
+
+  <div class="stat-row">
+    <div class="stat-box"><div class="val">{n_rxn:,}</div><div class="lbl">Reactions</div></div>
+    <div class="stat-box"><div class="val">{n_met:,}</div><div class="lbl">Metabolites</div></div>
+    <div class="stat-box"><div class="val">{n_gene:,}</div><div class="lbl">Genes</div></div>
+    <div class="stat-box"><div class="val">{n_blk:,}</div><div class="lbl">Blocked</div></div>
+    <div class="stat-box"><div class="val">{fba_str}</div><div class="lbl">FBA growth</div></div>
+  </div>
+
+  <h2>Static Figures</h2>
+  <div class="png-gallery">
+{png_gallery}  </div>
+
+  {'<h2>Mutation Analysis Summary</h2>' + mut_stat_cards if mut_stat_cards else ''}
+  {'<p style="margin:.5rem 0 .8rem;font-size:.83rem;color:#718096;">Top 20 genes by growth impact (all types). Open the <em>Interactive Reports → Mutation Analysis</em> tab for the full interactive chart.</p>' if mut_table_rows else ''}
+  {f'''<div style="overflow-x:auto;margin-top:.5rem;">
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Gene ID</th><th>Name</th><th>Type</th>
+        <th>Reactions</th><th>Growth ratio</th><th>Growth Δ%</th><th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+{mut_table_rows}    </tbody>
+  </table>
+  </div>''' if mut_table_rows else ''}
+</div>
+
+<!-- ══════════════════════════════════════════════════════════
+     PANEL 2 – Interactive Reports
+     ══════════════════════════════════════════════════════════ -->
+<div id="panel-reports" class="panel">
+  <div style="margin-bottom:.5rem;">
+{iframe_tabs}  </div>
+{iframe_panels}
+</div>
+
+<!-- ══════════════════════════════════════════════════════════
+     PANEL 3 – Environment Editor  (Feature [3])
+     ══════════════════════════════════════════════════════════ -->
+<div id="panel-environment" class="panel">
+  <p style="margin-bottom:1rem;font-size:.9rem;color:#4a5568;">
+    Edit exchange reaction bounds to define the growth medium, then copy the
+    generated shell command to re-run the pipeline with your changes.
+    <span class="info-chip">{len(open_exchanges)} open exchange reactions</span>
+  </p>
+
+  <!-- Preset environment buttons -->
+  <div class="preset-section">
+    <h3>Quick presets</h3>
+    {preset_btns_html}
+  </div>
+
+  <!-- Gap-fill medium shortcut -->
+  <div class="gap-fill-row">
+    <label for="gapfill-input">Gap-fill medium</label>
+    <input type="text" id="gapfill-input" placeholder="e.g. M9, LB, minimal"
+           oninput="updateCmd()" />
+    <span style="font-size:.8rem;color:#718096;margin-left:.4rem;">
+      (CarveMe medium name — leave blank to skip gap-filling)
+    </span>
+  </div>
+
+  <!-- Search / filter -->
+  <div class="filter-row">
+    <input type="text" id="env-search" placeholder="Filter reactions…"
+           oninput="filterEnvTable()" />
+    <button class="btn btn-secondary" onclick="resetAllBounds()">Reset all</button>
+    <button class="btn btn-danger"    onclick="clearAllBounds()">Clear all (set lb=0)</button>
+  </div>
+
+  <div style="overflow-x:auto;max-height:55vh;overflow-y:auto;border-radius:8px;">
+  <table class="data-table" id="env-table">
+    <thead>
+      <tr>
+        <th>Reaction ID</th>
+        <th>Name / metabolite</th>
+        <th>Lower bound<br><span style="font-weight:400;opacity:.8">(negative = uptake)</span></th>
+        <th>Upper bound</th>
+      </tr>
+    </thead>
+    <tbody id="env-tbody">
+{env_rows_html}    </tbody>
+  </table>
+  </div>
+
+  <!-- Generated command -->
+  <h2 style="margin-top:1.25rem;">Generated pipeline command</h2>
+  <p style="font-size:.83rem;color:#718096;margin:.4rem 0 .3rem;">
+    Copy and run this in your terminal (with the <code>gsmm_pipeline</code> conda env active):
+  </p>
+  <div class="cmd-box" id="cmd-box">
+    <button class="cmd-copy-btn" onclick="copyCmd()">Copy</button>
+    <span id="cmd-text"></span>
+  </div>
+</div>
+
+<script>
+// ── panel switching ──────────────────────────────────────────────────────────
+function switchPanel(btn, id) {{
+  document.querySelectorAll('.main-tab').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById(id).classList.add('active');
+}}
+
+// ── iframe tab switching ─────────────────────────────────────────────────────
+function switchIframe(btn, id) {{
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('iframe').forEach(f => f.style.display = 'none');
+  btn.classList.add('active');
+  document.getElementById(id).style.display = 'block';
+}}
+
+// ── environment editor ────────────────────────────────────────────────────────
+const ORIG_BOUNDS = {orig_bounds_json};
+const ENV_PRESETS = {env_presets_json};
+
+function applyPreset(key) {{
+  const preset = ENV_PRESETS[key];
+  if (!preset || !preset.bounds) return;
+  const bounds = preset.bounds;
+
+  // First reset all to originals, then apply preset overrides
+  document.querySelectorAll('#env-tbody tr').forEach(tr => {{
+    const rxnId = tr.dataset.rxn;
+    const orig  = ORIG_BOUNDS[rxnId];
+    if (!orig) return;
+    tr.querySelector('.lb-input').value = orig.lb;
+    tr.querySelector('.ub-input').value = orig.ub;
+    tr.querySelector('.lb-input').classList.remove('changed');
+    tr.querySelector('.ub-input').classList.remove('changed');
+  }});
+
+  // Apply preset-specific bounds
+  Object.entries(bounds).forEach(([rxnId, b]) => {{
+    const tr = document.querySelector(`#env-tbody tr[data-rxn="${{rxnId}}"]`);
+    if (!tr) return;
+    const lbInp = tr.querySelector('.lb-input');
+    const ubInp = tr.querySelector('.ub-input');
+    const orig  = ORIG_BOUNDS[rxnId];
+    if (lbInp && b.lb !== undefined) {{
+      lbInp.value = b.lb;
+      if (!orig || b.lb !== orig.lb) lbInp.classList.add('changed');
+    }}
+    if (ubInp && b.ub !== undefined) {{
+      ubInp.value = b.ub;
+      if (!orig || b.ub !== orig.ub) ubInp.classList.add('changed');
+    }}
+  }});
+
+  updateCmd();
+}}
+
+function filterEnvTable() {{
+  const q = document.getElementById('env-search').value.toLowerCase();
+  document.querySelectorAll('#env-tbody tr').forEach(tr => {{
+    const text = tr.textContent.toLowerCase();
+    tr.style.display = text.includes(q) ? '' : 'none';
+  }});
+}}
+
+function markChanged() {{
+  document.querySelectorAll('.lb-input, .ub-input').forEach(inp => {{
+    const orig = parseFloat(inp.dataset.orig);
+    const cur  = parseFloat(inp.value);
+    inp.classList.toggle('changed', !isNaN(cur) && cur !== orig);
+  }});
+  updateCmd();
+}}
+
+document.querySelectorAll('.lb-input, .ub-input').forEach(inp => {{
+  inp.addEventListener('input', markChanged);
+}});
+
+function resetAllBounds() {{
+  document.querySelectorAll('#env-tbody tr').forEach(tr => {{
+    const rxnId = tr.dataset.rxn;
+    const orig  = ORIG_BOUNDS[rxnId];
+    if (!orig) return;
+    tr.querySelector('.lb-input').value = orig.lb;
+    tr.querySelector('.ub-input').value = orig.ub;
+  }});
+  document.querySelectorAll('.lb-input, .ub-input').forEach(inp => {{
+    inp.classList.remove('changed');
+  }});
+  updateCmd();
+}}
+
+function clearAllBounds() {{
+  document.querySelectorAll('.lb-input').forEach(inp => {{
+    inp.value = 0;
+    inp.classList.add('changed');
+  }});
+  updateCmd();
+}}
+
+function getChangedBounds() {{
+  const changes = [];
+  document.querySelectorAll('#env-tbody tr').forEach(tr => {{
+    const rxnId = tr.dataset.rxn;
+    const orig  = ORIG_BOUNDS[rxnId];
+    if (!orig) return;
+    const newLb = parseFloat(tr.querySelector('.lb-input').value);
+    const newUb = parseFloat(tr.querySelector('.ub-input').value);
+    if (newLb !== orig.lb || newUb !== orig.ub) {{
+      changes.push({{rxnId, newLb, newUb}});
+    }}
+  }});
+  return changes;
+}}
+
+function updateCmd() {{
+  const gapfill = document.getElementById('gapfill-input').value.trim();
+  const changes = getChangedBounds();
+
+  let cmd = 'python generate_model.py \\\\\\n';
+  cmd += '    --fasta <path/to/genome.fna> \\\\\\n';
+  cmd += '    --gbk   <path/to/genome.gbk> \\\\\\n';
+  cmd += '    --output output/model.xml \\\\\\n';
+  if (gapfill) {{
+    cmd += `    --gap-fill ${{gapfill}} \\\\\\n`;
+  }}
+  cmd += '    --visualize\\n';
+
+  if (changes.length > 0) {{
+    cmd += '\\n# Exchange bound overrides (apply after model is built):\\n';
+    cmd += '# python -c "\\n';
+    cmd += '#   import cobra\\n';
+    cmd += '#   m = cobra.io.read_sbml_model(\\'output/model.xml\\')\\n';
+    changes.forEach(c => {{
+      cmd += `#   m.reactions.get_by_id(\\'${{c.rxnId}}\\').bounds = (${{c.newLb}}, ${{c.newUb}})\\n`;
+    }});
+    cmd += '#   cobra.io.write_sbml_model(m, \\'output/model_env.xml\\')\\n';
+    cmd += '# "\\n';
+  }}
+
+  document.getElementById('cmd-text').textContent = cmd;
+}}
+
+function copyCmd() {{
+  const text = document.getElementById('cmd-text').textContent;
+  navigator.clipboard.writeText(text).then(() => {{
+    const btn = document.querySelector('.cmd-copy-btn');
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy', 1500);
+  }});
+}}
+
+// initialise command on load
+updateCmd();
+</script>
+</body>
+</html>
+"""
+
+    out_path = out_dir / "index.html"
+    out_path.write_text(html, encoding="utf-8")
+    log.info("  Saved: %s", out_path)
 
 
 # ---------------------------------------------------------------------------
@@ -777,9 +1924,12 @@ def main() -> None:
 
     import cobra
     log.info("Loading model from %s …", model_path)
+    # Silence cobra's noisy 'Adding exchange reaction' / 'Ignoring reaction' messages
+    logging.getLogger("cobra").setLevel(logging.ERROR)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model = cobra.io.read_sbml_model(str(model_path))
+    logging.getLogger("cobra").setLevel(logging.WARNING)
     log.info("  Loaded: %d reactions, %d metabolites, %d genes",
              len(model.reactions), len(model.metabolites), len(model.genes))
 

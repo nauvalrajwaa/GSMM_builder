@@ -1,0 +1,157 @@
+{
+  "_comment": "GSMM environment presets. Each preset defines exchange reaction bounds that simulate a specific growth condition. Add, remove, or edit presets freely. 'lower_bound' < 0 means uptake is allowed; 0 means blocked.",
+  "presets": {
+    "default": {
+      "label": "Default (unconstrained)",
+      "description": "All exchange reactions open at ±1000. Baseline model conditions.",
+      "color": "#718096",
+      "bounds": {
+        "EX_glc__D_e": {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_o2_e":     {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_nh4_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_pi_e":     {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_so4_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_h2o_e":    {"lower_bound": -1000, "upper_bound": 1000}
+      }
+    },
+    "aerobic_minimal": {
+      "label": "Aerobic minimal (M9)",
+      "description": "M9 minimal medium: glucose as sole carbon source, aerobic, inorganic nitrogen/phosphorus/sulfur.",
+      "color": "#4C72B0",
+      "bounds": {
+        "EX_glc__D_e": {"lower_bound": -10,   "upper_bound": 1000},
+        "EX_o2_e":     {"lower_bound": -20,   "upper_bound": 1000},
+        "EX_nh4_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_pi_e":     {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_so4_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_h2o_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_na1_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_k_e":      {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_fe2_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_mg2_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_cl_e":     {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_ca2_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_ac_e":     {"lower_bound": 0,     "upper_bound": 1000},
+        "EX_lac__L_e": {"lower_bound": 0,     "upper_bound": 1000},
+        "EX_etoh_e":   {"lower_bound": 0,     "upper_bound": 1000}
+      }
+    },
+    "anaerobic": {
+      "label": "Anaerobic (no oxygen)",
+      "description": "Fermentative conditions. Oxygen blocked; mixed-acid fermentation products allowed.",
+      "color": "#C44E52",
+      "bounds": {
+        "EX_glc__D_e": {"lower_bound": -10,   "upper_bound": 1000},
+        "EX_o2_e":     {"lower_bound": 0,     "upper_bound": 1000},
+        "EX_nh4_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_pi_e":     {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_so4_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_h2o_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_ac_e":     {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_lac__L_e": {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_for_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_etoh_e":   {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_succ_e":   {"lower_bound": -1000, "upper_bound": 1000}
+      }
+    },
+    "high_salt": {
+      "label": "High salt stress",
+      "description": "Elevated NaCl simulating osmotic stress. Na⁺ and Cl⁻ uptake unrestricted; glucose uptake reduced to simulate impaired growth.",
+      "color": "#DD8833",
+      "bounds": {
+        "EX_glc__D_e": {"lower_bound": -5,    "upper_bound": 1000, "_note": "reduced uptake under osmotic stress"},
+        "EX_o2_e":     {"lower_bound": -15,   "upper_bound": 1000},
+        "EX_nh4_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_pi_e":     {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_so4_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_h2o_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_na1_e":    {"lower_bound": -1000, "upper_bound": 1000, "_note": "high Na+ from NaCl"},
+        "EX_cl_e":     {"lower_bound": -1000, "upper_bound": 1000, "_note": "high Cl- from NaCl"},
+        "EX_k_e":      {"lower_bound": -1000, "upper_bound": 1000}
+      }
+    },
+    "acid_stress": {
+      "label": "Acid stress (low pH)",
+      "description": "Simulates low-pH environment. Increased proton availability; reduced glucose uptake as membrane integrity is challenged.",
+      "color": "#E05252",
+      "bounds": {
+        "EX_glc__D_e": {"lower_bound": -7,    "upper_bound": 1000},
+        "EX_o2_e":     {"lower_bound": -15,   "upper_bound": 1000},
+        "EX_nh4_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_pi_e":     {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_so4_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_h2o_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_h_e":      {"lower_bound": -1000, "upper_bound": 1000, "_note": "excess protons at low pH"},
+        "EX_ac_e":     {"lower_bound": -1000, "upper_bound": 1000, "_note": "acetate accumulates at low pH"}
+      }
+    },
+    "nitrogen_limited": {
+      "label": "Nitrogen-limited",
+      "description": "Restricted ammonium availability. Carbon overflow metabolism expected.",
+      "color": "#55A868",
+      "bounds": {
+        "EX_glc__D_e": {"lower_bound": -10,   "upper_bound": 1000},
+        "EX_o2_e":     {"lower_bound": -20,   "upper_bound": 1000},
+        "EX_nh4_e":    {"lower_bound": -1,    "upper_bound": 1000, "_note": "severely limited nitrogen"},
+        "EX_pi_e":     {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_so4_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_h2o_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_ac_e":     {"lower_bound": -1000, "upper_bound": 1000}
+      }
+    },
+    "carbon_limited": {
+      "label": "Carbon-limited",
+      "description": "Minimal glucose supply. Growth is carbon-constrained.",
+      "color": "#8172B2",
+      "bounds": {
+        "EX_glc__D_e": {"lower_bound": -1,    "upper_bound": 1000, "_note": "very low glucose"},
+        "EX_o2_e":     {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_nh4_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_pi_e":     {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_so4_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_h2o_e":    {"lower_bound": -1000, "upper_bound": 1000}
+      }
+    },
+    "rich_lb": {
+      "label": "Rich medium (LB-like)",
+      "description": "Multiple carbon and nitrogen sources available (amino acids, sugars). Simulates LB broth.",
+      "color": "#CCB974",
+      "bounds": {
+        "EX_glc__D_e": {"lower_bound": -10,   "upper_bound": 1000},
+        "EX_fru_e":    {"lower_bound": -10,   "upper_bound": 1000},
+        "EX_ac_e":     {"lower_bound": -10,   "upper_bound": 1000},
+        "EX_pyr_e":    {"lower_bound": -10,   "upper_bound": 1000},
+        "EX_succ_e":   {"lower_bound": -5,    "upper_bound": 1000},
+        "EX_mal__L_e": {"lower_bound": -5,    "upper_bound": 1000},
+        "EX_fum_e":    {"lower_bound": -5,    "upper_bound": 1000},
+        "EX_lac__L_e": {"lower_bound": -5,    "upper_bound": 1000},
+        "EX_o2_e":     {"lower_bound": -20,   "upper_bound": 1000},
+        "EX_nh4_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_pi_e":     {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_so4_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_h2o_e":    {"lower_bound": -1000, "upper_bound": 1000}
+      }
+    },
+    "iron_limited": {
+      "label": "Iron-limited",
+      "description": "Iron starvation. Fe²⁺ and Fe³⁺ heavily restricted.",
+      "color": "#A05050",
+      "bounds": {
+        "EX_glc__D_e": {"lower_bound": -10,   "upper_bound": 1000},
+        "EX_o2_e":     {"lower_bound": -20,   "upper_bound": 1000},
+        "EX_nh4_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_pi_e":     {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_so4_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_h2o_e":    {"lower_bound": -1000, "upper_bound": 1000},
+        "EX_fe2_e":    {"lower_bound": -0.1,  "upper_bound": 1000, "_note": "very low iron"},
+        "EX_fe3_e":    {"lower_bound": -0.1,  "upper_bound": 1000}
+      }
+    },
+    "custom": {
+      "label": "Custom",
+      "description": "User-defined medium. Edit bounds in the table below and this preset will be updated.",
+      "color": "#4a5568",
+      "bounds": {}
+    }
+  }
+}
