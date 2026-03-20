@@ -2,8 +2,8 @@
 
 Automated pipeline for generating a **Genome-Scale Metabolic Model (GSMM)**
 from a FASTA + GenBank genomic input using **CarveMe** and **COBRApy**,
-with optional **comprehensive visualizations** and built-in **NCBI data fetching**
-for testing.
+with optional **comprehensive visualizations**, built-in **NCBI data fetching**,
+and a **Metabolic Cross-Feeding Network Builder** for metagenomics MAG inputs.
 
 ---
 
@@ -11,7 +11,7 @@ for testing.
 
 - [Miniconda](https://docs.conda.io/en/latest/miniconda.html) or Anaconda
 - GLPK solver (bundled via conda) **or** CPLEX (optional, faster)
-- Internet access for NCBI downloads
+- Internet access for NCBI downloads and KEGG API calls
 
 ---
 
@@ -35,7 +35,9 @@ carve --download
 | `fetch_ncbi.py` | Download FASTA + GenBank from NCBI RefSeq by accession |
 | `generate_model.py` | Full GSMM pipeline: extract proteins → CarveMe → COBRApy QC |
 | `visualize_model.py` | Comprehensive model visualization (standalone or via pipeline) |
-| `run_tests.py` | End-to-end test runner: fetch → pipeline → visualize, with pass/fail report |
+| `gene_config.py` | Apply knockout / knockin gene manipulations and generate Plotly report |
+| `crossfeed_network.py` | MAG cross-feeding network builder: KO annotations → bipartite metabolite flow graph |
+| `run_tests.py` | End-to-end test runner: fetch → pipeline → visualize → crossfeed, with pass/fail report |
 
 ---
 
@@ -53,7 +55,8 @@ This will:
 1. Download `NC_000913.3` (*E. coli* K-12 MG1655) from NCBI into `tests/NC_000913_3/`
 2. Run the GSMM pipeline; model saved to `tests/NC_000913_3/output/model.xml`
 3. Generate all visualizations in `tests/NC_000913_3/output/viz/`
-4. Print a pass/fail summary table and write `tests/test_report.json`
+4. Build MAG annotations automatically from fetched GenBank files and run cross-feeding
+5. Print a pass/fail summary table and write `tests/test_report.json`
 
 ---
 
@@ -82,6 +85,8 @@ python fetch_ncbi.py --skip-existing --email your@email.com
   --out-dir DIR                Output directory    (default: data/ncbi)
   --email EMAIL                NCBI email address  (required by NCBI policy)
   --skip-existing              Skip if FASTA+GBK already present
+  --mag-table FILE             Output MAG annotation CSV path
+  --skip-mag-table             Disable automatic MAG annotation generation
   --verbose / -v               Enable DEBUG logging
 ```
 
@@ -91,6 +96,7 @@ python fetch_ncbi.py --skip-existing --email your@email.com
 |------|-------------|
 | `<outdir>/<accession>.fna` | Nucleotide FASTA |
 | `<outdir>/<accession>.gbk` | Full GenBank annotation (with translations) |
+| `<outdir>/mag_annotations.csv` | Auto-generated MAG annotation table for crossfeed (`mag_id,ko_id,gene_id,...`) |
 | `<outdir>/ncbi_manifest.json` | Download manifest (accession, paths, status) |
 
 ---
@@ -148,7 +154,17 @@ tests/
             ├── reaction_network.html
             ├── dashboard.html
             ├── escher_map.html
-            └── model_summary.csv
+            ├── model_summary.csv
+            └── crossfeed/              ← cross-feeding network (if mag_annotations.csv present)
+                ├── index.html              ← MAG hub: 4-tab navigator
+                ├── crossfeed_network.html  ← bipartite network (taxonomy colors + click-highlight)
+                ├── crossfeed_sankey.html   ← metabolic flow Sankey diagram
+                ├── crossfeed_heatmap.html  ← KO pathway completeness heatmap
+                ├── keystone_report.html    ← Keystone species & dependency report
+                ├── keystone_report.csv     ← Keystone CSV (dependency + provision scores)
+                ├── crossfeed_edges.csv     ← edge list: producer → metabolite → consumer
+                ├── crossfeed_summary.json  ← summary statistics
+                └── kegg_cache.json         ← KEGG API response cache
 tests/test_report.json           ← JSON pass/fail report
 ```
 
@@ -250,8 +266,19 @@ All written to `output/viz/` by default (override with `--viz-dir`).
 | `flux_distribution.png` | Bar chart of top-30 reactions by absolute FBA flux |
 | `reaction_network.html` | Interactive Plotly bipartite reaction–metabolite network |
 | `dashboard.html` | Single-page interactive dashboard (stats + subsystems + fluxes) |
+| `mutation_analysis.html` | Knockout / knockin gene analysis scatter + bar charts |
 | `escher_map.html` | Interactive Escher metabolic map with FBA flux overlay |
+| `gene_config_report.html` | Gene config KO/KI Plotly report (if `gene_config.json` present) |
 | `model_summary.csv` | Machine-readable table of key model statistics |
+| `index.html` | Unified single-page hub: Overview, Interactive Reports, Environment Editor, Cross-Feeding Network |
+| `crossfeed/index.html` | MAG hub: 4-tab page (Network, Sankey, Heatmap, Report) with stat cards |
+| `crossfeed/crossfeed_network.html` | Bipartite cross-feeding network — taxonomy colors, click-to-highlight |
+| `crossfeed/crossfeed_sankey.html` | Sankey metabolic flow diagram (optional abundance weighting) |
+| `crossfeed/crossfeed_heatmap.html` | Pathway completeness heatmap: KO presence per MAG |
+| `crossfeed/keystone_report.html` | Keystone Species & Dependency HTML report |
+| `crossfeed/keystone_report.csv` | Keystone CSV: dependency score, provision score, keystone flag per MAG |
+| `crossfeed/crossfeed_edges.csv` | Tabular edge list: producer MAG → metabolite → consumer MAG |
+| `crossfeed/crossfeed_summary.json` | Machine-readable cross-feeding summary statistics |
 
 ---
 
@@ -260,6 +287,16 @@ All written to `output/viz/` by default (override with `--viz-dir`).
 ```bash
 python visualize_model.py --model output/model.xml --out-dir output/viz
 ```
+
+**Auto-detected extras** — place these files in the project root alongside
+`visualize_model.py` and they are picked up automatically:
+
+| File | Effect |
+|------|--------|
+| `gene_config.json` | Runs KO/KI analysis and generates Escher mutation maps |
+| `mag_annotations.csv` | Runs cross-feeding network and adds it to `index.html` (auto-generated by `fetch_ncbi.py` by default) |
+| `sample_mag_annotations.csv` | Bundled 8-MAG gut-microbiome fixture for demos/manual experiments |
+| `sample_kegg_cache.json` | Pre-built KEGG cache for offline/fast sample runs |
 
 Or from Python:
 
@@ -270,6 +307,171 @@ from visualize_model import run_all_visualizations
 
 model = cobra.io.read_sbml_model("output/model.xml")
 run_all_visualizations(model, out_dir=Path("output/viz"))
+```
+
+---
+
+## MAG cross-feeding network (`crossfeed_network.py`)
+
+Builds a **Metabolic Hand-off & Cross-Feeding Network** from metagenomics
+Metagenome-Assembled Genomes (MAGs) annotated with KEGG Orthology (KO) terms.
+
+For each MAG the tool resolves KO → KEGG reactions → substrate/product
+compound sets, then finds *cross-feeding edges*: metabolites produced by one
+MAG that are consumed by a different MAG. Results are exported as an
+interactive Plotly bipartite graph, an edge-list CSV, and a JSON summary.
+
+### Input format
+
+A CSV or TSV file with at least two columns:
+
+```
+mag_id,ko_id,gene_id,description
+MAG_001_Bifidobacterium,K00016,gene_003,L-lactate dehydrogenase
+MAG_002_Firmicutes,K00016,gene_006,L-lactate dehydrogenase
+MAG_002_Firmicutes,K00242,gene_010,Succinate dehydrogenase
+...
+```
+
+Column names `mag_id` and `ko_id` are the defaults; override with
+`--mag-col` / `--ko-col`.  Extra columns are ignored.
+
+### Quickstart
+
+```bash
+# Generate the built-in sample fixture (8 gut-microbiome MAGs, 57 KO terms)
+python crossfeed_network.py --generate-sample my_mags.csv
+
+# Build cross-feeding network from the sample
+python crossfeed_network.py --input my_mags.csv --out-dir output/crossfeed
+
+# Use your own annotation table
+python crossfeed_network.py --input my_real_mags.csv --out-dir output/crossfeed
+```
+
+### Common commands
+
+```bash
+# Minimal: just an input table (output goes to output/crossfeed)
+python crossfeed_network.py --input mag_annotations.csv
+
+# Custom output directory
+python crossfeed_network.py \
+    --input  mag_annotations.csv \
+    --out-dir results/crossfeed
+
+# TSV input with non-default column names
+python crossfeed_network.py \
+    --input   annotation_table.tsv \
+    --mag-col bin_id \
+    --ko-col  kegg_ko
+
+# Reuse a previously downloaded KEGG cache (avoids repeated API calls)
+python crossfeed_network.py \
+    --input  mag_annotations.csv \
+    --cache  output/crossfeed/kegg_cache.json
+
+# Limit the number of unique KO terms sent to the KEGG API
+# (useful for large datasets or rate-limited environments)
+python crossfeed_network.py \
+    --input       mag_annotations.csv \
+    --max-api-kos 200
+
+# Fully offline: set max-api-kos to 0 and supply a pre-built cache
+python crossfeed_network.py \
+    --input       mag_annotations.csv \
+    --cache       my_kegg_cache.json \
+    --max-api-kos 0
+
+# Verbose logging (shows every KEGG API call and graph detail)
+python crossfeed_network.py \
+    --input mag_annotations.csv \
+    --verbose
+
+# Generate the sample fixture and immediately analyse it
+python crossfeed_network.py --generate-sample /tmp/sample.csv
+python crossfeed_network.py --input /tmp/sample.csv --out-dir /tmp/crossfeed_out
+```
+
+### Integrate with an existing GSMM visualization run
+
+Place `mag_annotations.csv` in the project root (next to `visualize_model.py`).
+It is auto-discovered and the cross-feeding network is appended as a new tab in
+`index.html`:
+
+```bash
+# GSMM pipeline + visualizations + cross-feeding network (all in one)
+python generate_model.py \
+    --fasta  genome.fna \
+    --gbk    genome.gbk \
+    --output output/model.xml \
+    --visualize
+
+# The file mag_annotations.csv must exist in the project root.
+# Results appear in output/viz/crossfeed/ and as a tab in output/viz/index.html
+```
+
+Alternatively, trigger only the cross-feeding step from within Python:
+
+```python
+from pathlib import Path
+from crossfeed_network import run_crossfeed_analysis
+
+results = run_crossfeed_analysis(
+    table_path = Path("mag_annotations.csv"),
+    out_dir    = Path("output/crossfeed"),
+)
+print(f"Found {len(results['edges'])} cross-feeding edges")
+for edge in results["edges"][:5]:
+    print(f"  {edge['producer_mag']} → {edge['compound_name']} → {edge['consumer_mag']}")
+```
+
+### crossfeed_network.py options
+
+```
+  --input FILE, -i FILE     MAG annotation CSV/TSV (required)
+  --out-dir DIR, -o DIR     Output directory           (default: output/crossfeed)
+  --cache FILE              Path to KEGG JSON cache    (default: <out-dir>/kegg_cache.json)
+  --mag-col COL             MAG ID column name         (default: mag_id)
+  --ko-col COL              KO ID column name          (default: ko_id)
+  --max-api-kos N           Max unique KOs to resolve  (default: 500)
+  --generate-sample FILE    Write sample CSV to FILE and exit
+  --verbose / -v            Enable DEBUG logging
+```
+
+### Cross-feeding outputs
+
+All written to `--out-dir` (default `output/crossfeed/`):
+
+| File | Description |
+|------|-------------|
+| `index.html` | MAG hub: 4-tab navigator (Network, Sankey, Heatmap, Report) with stat cards |
+| `crossfeed_network.html` | Bipartite graph: MAGs colored by taxonomy, click a metabolite to highlight its producers/consumers |
+| `crossfeed_sankey.html` | Sankey metabolic flow: metabolite cascade from producers through metabolites to consumers |
+| `crossfeed_heatmap.html` | Pathway completeness heatmap: KO presence by MAG with completeness % per column |
+| `keystone_report.html` | Keystone Species & Dependency report: dependency score, provision score, keystone alerts |
+| `keystone_report.csv` | CSV: `mag_id, dependency_score, provision_score, n_metabolites_provided, n_metabolites_received, is_keystone, keystone_metabolites` |
+| `crossfeed_edges.csv` | Edge list: `producer_mag, compound_id, compound_name, consumer_mag` |
+| `crossfeed_summary.json` | Summary stats: n_mags, n_edges, n_metabolites, top metabolites, per-MAG capacity |
+| `kegg_cache.json` | Local cache of KEGG API results (reused on subsequent runs) |
+
+### How cross-feeding edges are detected
+
+1. For each KO term in each MAG, the KEGG REST API (`rest.kegg.jp`) is queried
+   for the associated reactions and their substrate / product compound IDs.
+2. A compound is flagged as a **cross-feeding metabolite** when at least one
+   MAG *produces* it (it appears as a product of one of that MAG's reactions)
+   and at least one *different* MAG *consumes* it (it appears as a substrate).
+3. Each (producer MAG, compound, consumer MAG) triple becomes one edge in the
+   bipartite graph.
+
+Example output for gut microbiome MAGs:
+
+```
+MAG_001_Bifidobacterium  →  Pyruvate    →  MAG_002_Firmicutes
+MAG_001_Bifidobacterium  →  L-Lactate   →  MAG_002_Firmicutes
+MAG_004_Bacteroides      →  Pyruvate    →  MAG_002_Firmicutes
+MAG_002_Firmicutes       →  NADH        →  MAG_001_Bifidobacterium
 ```
 
 ---
@@ -299,3 +501,7 @@ print(model.summary())               # flux summary
 | Escher map shows wrong organism | Supply your own Escher JSON map (see [escher docs](https://escher.readthedocs.io)) |
 | NCBI fetch times out / fails | NCBI rate-limits unauthenticated requests; set `--email` and retry |
 | `HTTP Error 429` during fetch | Wait a few minutes then re-run with `--skip-existing` |
+| Cross-feeding: 0 edges found | KO terms not resolving to reactions — check internet access or supply a `--cache` file |
+| Cross-feeding: KEGG rate limit | Reduce `--max-api-kos` or run again (cache will resume from where it stopped) |
+| Cross-feeding: `requests` missing | `pip install requests` inside the conda env |
+| `mag_annotations.csv` not picked up by `visualize_model.py` | Place the file in the same directory as `visualize_model.py` (project root) |

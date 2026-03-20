@@ -56,6 +56,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from mag_annotation_builder import build_mag_annotations_from_gbks
+
 
 # ---------------------------------------------------------------------------
 # Resolve the Python interpreter to use for sub-scripts.
@@ -215,6 +217,8 @@ def run_test_case(
     skip_download: bool = False,
     gap_fill: str | None = None,
     keep_intermediates: bool = False,
+    community_fetch_dir: Path | None = None,
+    community_mag_table: Path | None = None,
 ) -> TestResult:
     result = TestResult(case=case)
 
@@ -236,6 +240,7 @@ def run_test_case(
 
     pipeline_python = _find_pipeline_python()
     log.debug("Using Python interpreter: %s", pipeline_python)
+    runtime_mag_table = base_dir / "community_mag_annotations_runtime.csv"
 
     # ------------------------------------------------------------------
     # Step 1 – Download from NCBI
@@ -244,6 +249,30 @@ def run_test_case(
     if skip_download and fasta_path.is_file() and gbk_path.is_file():
         log.info("[%s] Skipping download (--skip-download, files exist).", acc)
         result.add(step_name, ok=True, notes="skipped (files exist)")
+    elif community_fetch_dir is not None:
+        src_fasta = community_fetch_dir / f"{acc}.fna"
+        src_gbk = community_fetch_dir / f"{acc}.gbk"
+        if src_fasta.is_file() and src_gbk.is_file():
+            t0 = time.monotonic()
+            shutil.copy2(src_fasta, fasta_path)
+            shutil.copy2(src_gbk, gbk_path)
+            elapsed = time.monotonic() - t0
+            result.add(step_name, ok=True, elapsed=elapsed, notes="copied from shared accession fetch")
+        else:
+            log.info("[%s] Shared fetch files missing; falling back to direct fetch.", acc)
+            fetch_cmd = [
+                pipeline_python, "fetch_ncbi.py",
+                "--accessions", acc,
+                "--out-dir", str(work),
+                "--email", email,
+            ]
+            if skip_download:
+                fetch_cmd.append("--skip-existing")
+            ok, elapsed, _ = _run(fetch_cmd, log, label=step_name)
+            result.add(step_name, ok=ok, elapsed=elapsed)
+            if not ok:
+                log.error("[%s] Download failed – aborting test case.", acc)
+                return result
     else:
         log.info("[%s] Step 1/3: Downloading genome from NCBI …", acc)
         fetch_cmd = [
@@ -312,6 +341,17 @@ def run_test_case(
     # ------------------------------------------------------------------
     # Step 3 – Visualize
     # ------------------------------------------------------------------
+    effective_mag_table = community_mag_table if (community_mag_table is not None and community_mag_table.is_file()) else None
+    if effective_mag_table is None:
+        dynamic_gbks = sorted(base_dir.glob("*/*.gbk"))
+        if dynamic_gbks:
+            stats_dynamic = build_mag_annotations_from_gbks(dynamic_gbks, runtime_mag_table, log=log)
+            if stats_dynamic["n_rows"] > 0:
+                effective_mag_table = runtime_mag_table
+
+    if effective_mag_table is not None and effective_mag_table.is_file():
+        shutil.copy2(effective_mag_table, work / "mag_annotations.csv")
+
     log.info("[%s] Step 3/3: Generating visualizations …", acc)
     ok, elapsed, _ = _run(
         [
@@ -353,6 +393,42 @@ def run_test_case(
         notes_v += f"  |  optional present: {', '.join(present_opt)}"
 
     result.add("visualize_model", ok=ok and not missing_req, elapsed=elapsed, notes=notes_v)
+
+    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    mag_table = work / "mag_annotations.csv"
+    if mag_table.is_file():
+        log.info("[%s] Step 4/4: Running cross-feeding network analysis …", acc)
+        crossfeed_dir = viz_dir / "crossfeed"
+        ok_cf, elapsed_cf, _ = _run(
+            [
+                pipeline_python, "crossfeed_network.py",
+                "--input",   str(mag_table),
+                "--out-dir", str(crossfeed_dir),
+                "--max-api-kos", "220",
+            ],
+            log,
+            label="crossfeed_network",
+            timeout=1800,
+        )
+        cf_html    = crossfeed_dir / "crossfeed_network.html"
+        cf_sankey  = crossfeed_dir / "crossfeed_sankey.html"
+        cf_heatmap = crossfeed_dir / "crossfeed_heatmap.html"
+        cf_report  = crossfeed_dir / "keystone_report.html"
+        cf_csv     = crossfeed_dir / "crossfeed_edges.csv"
+        cf_json    = crossfeed_dir / "crossfeed_summary.json"
+        cf_ks_csv  = crossfeed_dir / "keystone_report.csv"
+        cf_index   = crossfeed_dir / "index.html"
+        _cf_all    = [cf_html, cf_sankey, cf_heatmap, cf_report,
+                      cf_csv, cf_json, cf_ks_csv, cf_index]
+        cf_outputs = [f.name for f in _cf_all if f.is_file()]
+        notes_cf = f"{len(cf_outputs)}/8 output files present"
+        if cf_outputs:
+            notes_cf += f"  |  {', '.join(cf_outputs)}"
+        result.add("crossfeed_network", ok=ok_cf, elapsed=elapsed_cf, notes=notes_cf)
+    else:
+        log.info("[%s] mag_annotations.csv not found – skipping crossfeed step.", acc)
+        result.add("crossfeed_network", ok=True, notes="skipped (no MAG annotation table)")
 
     # ------------------------------------------------------------------
     # Cleanup (optional)
@@ -522,6 +598,52 @@ def main() -> None:
     log.info("Gap-fill    : %s", args.gap_fill or "none")
     log.info("Skip dl     : %s", args.skip_download)
 
+    community_fetch_dir = base / "_community_fetch"
+    community_mag_table = base / "community_mag_annotations.csv"
+    accessions = [tc.accession for tc in test_cases]
+
+    if not args.skip_download:
+        log.info("Preparing shared fetch for all accessions (%d) …", len(accessions))
+        pipeline_python = _find_pipeline_python()
+        ok_shared, elapsed_shared, _ = _run(
+            [
+                pipeline_python,
+                "fetch_ncbi.py",
+                "--accessions",
+                *accessions,
+                "--out-dir",
+                str(community_fetch_dir),
+                "--email",
+                args.email,
+                "--mag-table",
+                str(community_mag_table),
+            ],
+            log,
+            label="fetch_ncbi_shared",
+            timeout=3600,
+        )
+        if not ok_shared:
+            log.warning("Shared fetch failed after %.1fs; per-case fetch fallback will be used.", elapsed_shared)
+
+    gbk_candidates = [community_fetch_dir / f"{acc}.gbk" for acc in accessions if (community_fetch_dir / f"{acc}.gbk").is_file()]
+    if not gbk_candidates:
+        for acc in accessions:
+            safe = acc.replace(".", "_")
+            candidate = base / safe / f"{acc}.gbk"
+            if candidate.is_file():
+                gbk_candidates.append(candidate)
+
+    if gbk_candidates:
+        stats = build_mag_annotations_from_gbks(gbk_candidates, community_mag_table, log=log)
+        log.info(
+            "Community MAG table prepared: %s (rows=%d, mags=%d)",
+            community_mag_table,
+            stats["n_rows"],
+            stats["n_mags_with_annotations"],
+        )
+    else:
+        log.warning("No GenBank files available to build community MAG annotation table.")
+
     results: list[TestResult] = []
     for case in test_cases:
         tr = run_test_case(
@@ -532,6 +654,8 @@ def main() -> None:
             skip_download      = args.skip_download,
             gap_fill           = args.gap_fill,
             keep_intermediates = args.keep_intermediates,
+            community_fetch_dir = community_fetch_dir if community_fetch_dir.is_dir() else None,
+            community_mag_table = community_mag_table if community_mag_table.is_file() else None,
         )
         results.append(tr)
 

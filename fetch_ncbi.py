@@ -52,6 +52,8 @@ from typing import Any
 # Biopython Entrez – always available in this environment
 from Bio import Entrez, SeqIO
 
+from mag_annotation_builder import build_mag_annotations_from_gbks
+
 # ---------------------------------------------------------------------------
 # Built-in test dataset
 # ---------------------------------------------------------------------------
@@ -327,6 +329,18 @@ def _parse_args() -> argparse.Namespace:
         default=False,
         help="Enable DEBUG logging.",
     )
+    p.add_argument(
+        "--mag-table",
+        default=None,
+        metavar="FILE",
+        help="Path to write crossfeed MAG annotation table (default: <out-dir>/mag_annotations.csv).",
+    )
+    p.add_argument(
+        "--skip-mag-table",
+        action="store_true",
+        default=False,
+        help="Skip automatic MAG annotation table generation from downloaded GenBank files.",
+    )
     return p.parse_args()
 
 
@@ -350,6 +364,28 @@ def main() -> None:
         log         = log,
         skip_existing=args.skip_existing,
     )
+
+    if not args.skip_mag_table:
+        out_dir = Path(args.out_dir)
+        mag_table_path = Path(args.mag_table) if args.mag_table else out_dir / "mag_annotations.csv"
+        gbk_paths = [Path(r["gbk"]) for r in results if r["ok"] and Path(r["gbk"]).is_file()]
+        if gbk_paths:
+            try:
+                stats = build_mag_annotations_from_gbks(gbk_paths, mag_table_path, log=log)
+                log.info(
+                    "MAG annotation table ready: %s (rows=%d, MAGs=%d)",
+                    mag_table_path,
+                    stats["n_rows"],
+                    stats["n_mags_with_annotations"],
+                )
+            except Exception as exc:
+                log.error("Failed to build MAG annotation table: %s", exc)
+                for r in results:
+                    if r["ok"]:
+                        r["ok"] = False
+                        r["error"] = f"MAG annotation table generation failed: {exc}"
+        else:
+            log.warning("No successful GenBank downloads available for MAG table generation.")
 
     any_failed = any(not r["ok"] for r in results)
     sys.exit(1 if any_failed else 0)

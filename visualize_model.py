@@ -1210,6 +1210,38 @@ def run_all_visualizations(
     # CSV summary (pass mutation_df so KO stats can be included)
     export_summary_csv(model, blocked, fba_value, out_dir, log, mutation_df=mutation_df)
 
+    # ---------------------------------------------------------------------------
+    # Cross-feeding network (feature [3] – MAG metagenomics inputs)
+    # Auto-discover a MAG annotation table in the standard search paths:
+    #   <project_root>/mag_annotations.csv  (or .tsv)
+    #   <out_dir>/../../mag_annotations.csv
+    # If found, run the cross-feeding network analysis.
+    # ---------------------------------------------------------------------------
+    _script_dir = Path(__file__).parent
+    _mag_candidates = [
+        _script_dir / "mag_annotations.csv",
+        _script_dir / "mag_annotations.tsv",
+        out_dir.parent.parent / "mag_annotations.csv",
+        out_dir.parent.parent / "mag_annotations.tsv",
+        Path("mag_annotations.csv"),
+        Path("mag_annotations.tsv"),
+    ]
+    _mag_table = next((p for p in _mag_candidates if p.is_file()), None)
+    if _mag_table is not None:
+        try:
+            from crossfeed_network import run_crossfeed_analysis
+            crossfeed_dir = out_dir / "crossfeed"
+            log.info("  Found MAG annotation table: %s", _mag_table)
+            run_crossfeed_analysis(
+                table_path=_mag_table,
+                out_dir=crossfeed_dir,
+                log=log,
+            )
+        except Exception as exc:
+            log.warning("  Cross-feeding network skipped: %s", exc)
+    else:
+        log.info("  No mag_annotations.csv found – cross-feeding network skipped.")
+
     log.info("All visualizations complete.  Output directory: %s", out_dir)
 
     # Generate the single consolidated index.html report
@@ -1266,6 +1298,7 @@ def generate_index_html(
         ("escher_map.html",        "Escher Map (WT)"),
         ("escher_mutations/escher_mutations_index.html", "Escher Mutations"),
         ("gene_config_report.html", "Gene Config Report"),
+        ("crossfeed/crossfeed_network.html", "Cross-Feeding Network"),
     ]
     available_html = [(fn, lbl) for fn, lbl in html_reports if (out_dir / fn).is_file()]
 
@@ -1361,6 +1394,18 @@ def generate_index_html(
             break
     env_presets_json = json.dumps(env_presets)
 
+    # ── load cross-feeding network summary (if present) ───────────────────────
+    crossfeed_summary: dict = {}
+    crossfeed_html_path = out_dir / "crossfeed" / "crossfeed_network.html"
+    crossfeed_json_path = out_dir / "crossfeed" / "crossfeed_summary.json"
+    if crossfeed_json_path.is_file():
+        try:
+            with open(crossfeed_json_path, encoding="utf-8") as _cfh:
+                crossfeed_summary = json.load(_cfh)
+        except Exception:
+            pass
+    _has_crossfeed = crossfeed_html_path.is_file()
+
     # Build preset button HTML
     preset_btns_html = ""
     for key, preset in env_presets.items():
@@ -1418,6 +1463,89 @@ def generate_index_html(
             <div class="stat-label">Knockin candidates</div>
           </div>
         </div>"""
+
+    # ── cross-feeding summary HTML ────────────────────────────────────────────
+    crossfeed_tab_btn = ""
+    crossfeed_panel_html = ""
+    if _has_crossfeed:
+        cf_n_mags  = crossfeed_summary.get("n_mags", "—")
+        cf_n_edges = crossfeed_summary.get("n_edges", "—")
+        cf_n_mets  = crossfeed_summary.get("n_metabolites", "—")
+        cf_mag_ids = crossfeed_summary.get("mag_ids", [])
+        cf_top_mets = crossfeed_summary.get("top_metabolites", [])
+
+        # Top metabolite table rows
+        cf_top_met_rows = ""
+        for item in cf_top_mets[:15]:
+            cf_top_met_rows += (
+                f"<tr>"
+                f"<td>{item.get('compound_id','')}</td>"
+                f"<td>{item.get('compound_name','')}</td>"
+                f"<td>{item.get('n_edges','')}</td>"
+                f"</tr>\n"
+            )
+
+        # MAG stats rows
+        cf_mag_stat_rows = ""
+        cf_mag_stats = crossfeed_summary.get("mag_stats", {})
+        for mag_id in cf_mag_ids:
+            stats = cf_mag_stats.get(mag_id, {})
+            cf_mag_stat_rows += (
+                f"<tr>"
+                f"<td>{mag_id}</td>"
+                f"<td>{stats.get('n_products','—')}</td>"
+                f"<td>{stats.get('n_substrates','—')}</td>"
+                f"</tr>\n"
+            )
+
+        crossfeed_tab_btn = (
+            '<button class="main-tab" '
+            'onclick="switchPanel(this,\'panel-crossfeed\')">Cross-Feeding Network</button>'
+        )
+        crossfeed_panel_html = f"""
+<!-- ══════════════════════════════════════════════════════════
+     PANEL 4 – Cross-Feeding Network  (Feature [1] feature_3)
+     ══════════════════════════════════════════════════════════ -->
+<div id="panel-crossfeed" class="panel">
+  <p style="margin-bottom:1rem;font-size:.9rem;color:#4a5568;">
+    Metabolic hand-off &amp; cross-feeding network for metagenomics MAG inputs.
+    Nodes represent MAGs (left) and exchanged metabolites (right); directed edges
+    show which MAG produces a metabolite and which MAG consumes it.
+  </p>
+
+  <!-- Summary stat cards -->
+  <div class="stat-row" style="margin-bottom:1.2rem;">
+    <div class="stat-box"><div class="val">{cf_n_mags}</div><div class="lbl">MAGs</div></div>
+    <div class="stat-box"><div class="val">{cf_n_mets}</div><div class="lbl">Exchanged metabolites</div></div>
+    <div class="stat-box"><div class="val">{cf_n_edges}</div><div class="lbl">Cross-feeding edges</div></div>
+  </div>
+
+  <!-- Interactive bipartite graph iframe -->
+  <h2 style="margin-bottom:.5rem;">Interactive Network</h2>
+  <iframe src="crossfeed/crossfeed_network.html"
+          style="width:100%;height:75vh;border:1px solid #e2e8f0;border-radius:8px;">
+  </iframe>
+
+  <!-- MAG statistics table -->
+  <h2 style="margin-top:1.5rem;margin-bottom:.5rem;">MAG Metabolic Capacity</h2>
+  <div style="overflow-x:auto;margin-bottom:1.5rem;">
+  <table class="data-table">
+    <thead><tr><th>MAG ID</th><th>Products</th><th>Substrates</th></tr></thead>
+    <tbody>{cf_mag_stat_rows}</tbody>
+  </table>
+  </div>
+
+  <!-- Top exchanged metabolites table -->
+  {'<h2 style="margin-bottom:.5rem;">Top Exchanged Metabolites</h2>' if cf_top_met_rows else ''}
+  {f'<div style="overflow-x:auto;"><table class="data-table"><thead><tr><th>Compound ID</th><th>Name</th><th>Cross-feeding edges</th></tr></thead><tbody>{cf_top_met_rows}</tbody></table></div>' if cf_top_met_rows else ''}
+
+  <p style="margin-top:1rem;font-size:.82rem;color:#718096;">
+    Source: <code>crossfeed/crossfeed_network.html</code> &nbsp;|&nbsp;
+    Edge list: <code>crossfeed/crossfeed_edges.csv</code> &nbsp;|&nbsp;
+    Summary: <code>crossfeed/crossfeed_summary.json</code>
+  </p>
+</div>
+"""
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -1627,6 +1755,7 @@ def generate_index_html(
   <button class="main-tab active" onclick="switchPanel(this,'panel-overview')">Overview</button>
   <button class="main-tab" onclick="switchPanel(this,'panel-reports')">Interactive Reports</button>
   <button class="main-tab" onclick="switchPanel(this,'panel-environment')">Environment Editor</button>
+  {crossfeed_tab_btn}
 </div>
 
 <!-- ══════════════════════════════════════════════════════════
@@ -1886,6 +2015,7 @@ function copyCmd() {{
 // initialise command on load
 updateCmd();
 </script>
+{crossfeed_panel_html}
 </body>
 </html>
 """
