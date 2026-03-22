@@ -18,28 +18,28 @@ Test cases (E. coli K-12 focused, as requested)
 Usage
 -----
     # Run all tests (downloads data automatically)
-    python run_tests.py
+    python src/run_tests.py
 
     # Skip download if data already exists
-    python run_tests.py --skip-download
+    python src/run_tests.py --skip-download
 
     # Run only a specific accession
-    python run_tests.py --accessions NC_000913.3
+    python src/run_tests.py --accessions NC_000913.3
 
     # Keep intermediate files (proteins.faa, logs) after run
-    python run_tests.py --keep-intermediates
+    python src/run_tests.py --keep-intermediates
 
     # Run with gap-filling on M9 medium
-    python run_tests.py --gap-fill M9
+    python src/run_tests.py --gap-fill M9
 
     # Set NCBI email (required by NCBI policy)
-    python run_tests.py --email your@email.com
+    python src/run_tests.py --email your@email.com
 
 Requirements
 ------------
     conda activate gsmm_pipeline
-    # fetch_ncbi.py, generate_model.py, visualize_model.py must be in the
-    # same directory as this script.
+    # run from repository root:
+    # python src/run_tests.py
 """
 
 from __future__ import annotations
@@ -57,6 +57,13 @@ from pathlib import Path
 from typing import Any
 
 from mag_annotation_builder import build_mag_annotations_from_gbks
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+FETCH_SCRIPT = SCRIPT_DIR / "fetch_ncbi.py"
+GENERATE_SCRIPT = SCRIPT_DIR / "generate_model.py"
+VISUALIZE_SCRIPT = SCRIPT_DIR / "visualize_model.py"
+CROSSFEED_SCRIPT = SCRIPT_DIR / "crossfeed_network.py"
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +268,7 @@ def run_test_case(
         else:
             log.info("[%s] Shared fetch files missing; falling back to direct fetch.", acc)
             fetch_cmd = [
-                pipeline_python, "fetch_ncbi.py",
+                pipeline_python, str(FETCH_SCRIPT),
                 "--accessions", acc,
                 "--out-dir", str(work),
                 "--email", email,
@@ -276,7 +283,7 @@ def run_test_case(
     else:
         log.info("[%s] Step 1/3: Downloading genome from NCBI …", acc)
         fetch_cmd = [
-            pipeline_python, "fetch_ncbi.py",
+            pipeline_python, str(FETCH_SCRIPT),
             "--accessions", acc,
             "--out-dir", str(work),
             "--email", email,
@@ -304,7 +311,7 @@ def run_test_case(
     # ------------------------------------------------------------------
     log.info("[%s] Step 2/3: Running GSMM pipeline …", acc)
     pipeline_cmd = [
-        pipeline_python, "generate_model.py",
+        pipeline_python, str(GENERATE_SCRIPT),
         "--fasta",  str(fasta_path),
         "--gbk",    str(gbk_path),
         "--output", str(model_path),
@@ -355,7 +362,7 @@ def run_test_case(
     log.info("[%s] Step 3/3: Generating visualizations …", acc)
     ok, elapsed, _ = _run(
         [
-            pipeline_python, "visualize_model.py",
+            pipeline_python, str(VISUALIZE_SCRIPT),
             "--model",   str(model_path),
             "--out-dir", str(viz_dir),
         ],
@@ -402,7 +409,7 @@ def run_test_case(
         crossfeed_dir = viz_dir / "crossfeed"
         ok_cf, elapsed_cf, _ = _run(
             [
-                pipeline_python, "crossfeed_network.py",
+                pipeline_python, str(CROSSFEED_SCRIPT),
                 "--input",   str(mag_table),
                 "--out-dir", str(crossfeed_dir),
                 "--max-api-kos", "220",
@@ -418,11 +425,10 @@ def run_test_case(
         cf_csv     = crossfeed_dir / "crossfeed_edges.csv"
         cf_json    = crossfeed_dir / "crossfeed_summary.json"
         cf_ks_csv  = crossfeed_dir / "keystone_report.csv"
-        cf_index   = crossfeed_dir / "index.html"
         _cf_all    = [cf_html, cf_sankey, cf_heatmap, cf_report,
-                      cf_csv, cf_json, cf_ks_csv, cf_index]
+                      cf_csv, cf_json, cf_ks_csv]
         cf_outputs = [f.name for f in _cf_all if f.is_file()]
-        notes_cf = f"{len(cf_outputs)}/8 output files present"
+        notes_cf = f"{len(cf_outputs)}/7 output files present"
         if cf_outputs:
             notes_cf += f"  |  {', '.join(cf_outputs)}"
         result.add("crossfeed_network", ok=ok_cf, elapsed=elapsed_cf, notes=notes_cf)
@@ -608,7 +614,7 @@ def main() -> None:
         ok_shared, elapsed_shared, _ = _run(
             [
                 pipeline_python,
-                "fetch_ncbi.py",
+                str(FETCH_SCRIPT),
                 "--accessions",
                 *accessions,
                 "--out-dir",

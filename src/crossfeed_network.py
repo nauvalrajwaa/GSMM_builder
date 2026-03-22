@@ -38,13 +38,13 @@ passed through a MetaCyc-to-KEGG mapping layer.
 CLI usage
 ---------
     # Build network from an annotation table
-    python crossfeed_network.py --input mag_annotations.csv --out-dir output/crossfeed
+    python src/crossfeed_network.py --input mag_annotations.csv --out-dir output/crossfeed
 
     # Use a pre-populated KEGG cache (avoids API calls in offline/test mode)
-    python crossfeed_network.py --input mag_annotations.csv --cache kegg_cache.json
+    python src/crossfeed_network.py --input mag_annotations.csv --cache kegg_cache.json
 
     # Generate sample fixture and exit
-    python crossfeed_network.py --generate-sample sample_mag_annotations.csv
+    python src/crossfeed_network.py --generate-sample sample_mag_annotations.csv
 
 Outputs (written to ``out_dir``)
 ---------------------------------
@@ -564,16 +564,6 @@ def plot_crossfeed_network(
     out_dir: Path,
     log:     logging.Logger,
 ) -> Path | None:
-    """
-    Generate an interactive Plotly bipartite graph HTML.
-
-    Layout:
-      - MAG nodes on the left column, spaced vertically.
-      - Metabolite nodes on the right column, spaced vertically.
-      - Directed edges drawn as arrows (annotated traces).
-
-    Returns the output file Path, or None on failure.
-    """
     if not _HAS_PLOTLY or go is None:
         log.warning("plotly not installed – skipping cross-feeding network plot.")
         return None
@@ -584,209 +574,303 @@ def plot_crossfeed_network(
         log.warning("  Empty graph – no cross-feeding network to visualise.")
         return None
 
-    mag_nodes = sorted(
-        [n for n, d in G.nodes(data=True) if d.get("type") == "mag"]
-    )
-    met_nodes = sorted(
-        [n for n, d in G.nodes(data=True) if d.get("type") == "metabolite"]
-    )
-
+    mag_nodes = sorted([n for n, d in G.nodes(data=True) if d.get("type") == "mag"])
+    met_nodes = sorted([n for n, d in G.nodes(data=True) if d.get("type") == "metabolite"])
     n_mag = len(mag_nodes)
     n_met = len(met_nodes)
+    if n_mag == 0 or n_met == 0:
+        log.warning("  Cross-feeding graph lacks MAG or metabolite nodes – skipping plot.")
+        return None
 
-    # ── node positions ────────────────────────────────────────────────────────
-    # MAGs: x=0, evenly spaced y in [0..1]
-    # Metabolites: x=1, evenly spaced y in [0..1]
-    mag_pos  = {m: (0.0, 1.0 - i / max(n_mag - 1, 1)) for i, m in enumerate(mag_nodes)}
-    met_pos  = {c: (1.0, 1.0 - i / max(n_met - 1, 1)) for i, c in enumerate(met_nodes)}
-    all_pos  = {**mag_pos, **met_pos}
+    import math
 
     mag_colors = _mag_color_palette(n_mag)
     mag_color_map = dict(zip(mag_nodes, mag_colors))
 
-    # ── build edge traces ─────────────────────────────────────────────────────
-    # One trace per unique (producer_mag, metabolite) pair so we can colour by MAG
-    # We draw producer→metabolite edges in MAG colour and metabolite→consumer dashed.
+    cpd_label: dict[str, str] = {}
+    for n, d in G.nodes(data=True):
+        if d.get("type") != "metabolite":
+            continue
+        compound_id = str(d.get("compound_id", n))
+        compound_name_raw = d.get("compound_name")
+        compound_name = str(compound_name_raw).strip() if compound_name_raw else compound_id
+        cpd_label[compound_id] = compound_name
+
+    def _to_float(val: Any) -> float | None:
+        try:
+            if val is None:
+                return None
+            return float(val)
+        except Exception:
+            return None
+
+    compound_support: dict[str, int] = defaultdict(int)
+    for e in edges:
+        compound_support[str(e.get("compound_id", ""))] += 1
+
+    raw_values: list[float] = []
+    edge_metric: dict[tuple[str, str, str], float] = {}
+    edge_metric_is_flux: dict[tuple[str, str, str], bool] = {}
+    for e in edges:
+        producer = str(e.get("producer_mag", ""))
+        consumer = str(e.get("consumer_mag", ""))
+        cpd_id = str(e.get("compound_id", ""))
+        metric = None
+        found_flux = False
+        for k in ("flux", "flux_value", "value", "weight", "score", "mmol_gdcw_h"):
+            metric = _to_float(e.get(k))
+            if metric is not None:
+                found_flux = True
+                break
+        if metric is None:
+            metric = float(max(1, compound_support.get(cpd_id, 1)))
+        metric = abs(metric)
+        raw_values.append(metric)
+        edge_metric[(producer, cpd_id, consumer)] = metric
+        edge_metric_is_flux[(producer, cpd_id, consumer)] = found_flux
+
+    min_metric = min(raw_values) if raw_values else 1.0
+    max_metric = max(raw_values) if raw_values else 1.0
+
+    def _edge_width(metric: float) -> float:
+        if max_metric <= min_metric + 1e-12:
+            return 3.8
+        norm = (metric - min_metric) / (max_metric - min_metric)
+        return 1.8 + 7.2 * norm
+
+    mag_radius = max(5.6, 4.8 + 0.95 * math.sqrt(n_mag))
+    met_radius = max(1.4, mag_radius * 0.26)
+    mag_pos: dict[str, tuple[float, float]] = {}
+    for i, m in enumerate(mag_nodes):
+        a = (2.0 * math.pi * i) / max(n_mag, 1)
+        mag_pos[m] = (mag_radius * math.cos(a), mag_radius * math.sin(a))
+
+    met_pos: dict[str, tuple[float, float]] = {}
+    for j, c in enumerate(met_nodes):
+        producers = [p for p in G.predecessors(c) if p in mag_pos]
+        consumers = [q for q in G.successors(c) if q in mag_pos]
+        linked = producers + consumers
+        if linked:
+            mx = sum(mag_pos[m][0] for m in linked) / len(linked)
+            my = sum(mag_pos[m][1] for m in linked) / len(linked)
+            scale = 0.31 + 0.14 / max(len(linked), 1)
+            jitter_ang = (2.0 * math.pi * (j + 1)) / max(n_met, 1)
+            jitter = 0.045 * met_radius
+            met_pos[c] = (
+                max(-met_radius * 1.6, min(met_radius * 1.6, mx * scale + jitter * math.cos(jitter_ang))),
+                max(-met_radius * 1.6, min(met_radius * 1.6, my * scale + jitter * math.sin(jitter_ang))),
+            )
+        else:
+            a = (2.0 * math.pi * j) / max(n_met, 1)
+            met_pos[c] = (met_radius * math.cos(a), met_radius * math.sin(a))
+
+    export_color = "#f97316"
+    import_color = "#0ea5e9"
+
     edge_traces: list[Any] = []
-    annotations = []
+    edge_hover_x: list[float] = []
+    edge_hover_y: list[float] = []
+    edge_hover_text: list[str] = []
+    annotations: list[dict[str, Any]] = []
 
-    # Map compound_id → compound_name for tooltip
-    cpd_label: dict[str, str] = {
-        d.get("compound_id", n): d.get("compound_name", n)
-        for n, d in G.nodes(data=True)
-        if d.get("type") == "metabolite"
-    }
+    for e in edges:
+        producer = str(e.get("producer_mag", ""))
+        consumer = str(e.get("consumer_mag", ""))
+        cpd_id = str(e.get("compound_id", ""))
+        cpd_name = str(e.get("compound_name", "") or cpd_label.get(cpd_id, cpd_id))
+        if producer not in mag_pos or consumer not in mag_pos or cpd_id not in met_pos:
+            continue
 
-    # Draw producer → metabolite (coloured by producer MAG)
-    for mag in mag_nodes:
-        mag_col = mag_color_map[mag]
-        for cpd in G.successors(mag):
-            x0, y0 = mag_pos[mag]
-            x1, y1 = met_pos.get(cpd, (1.0, 0.5))
-            edge_traces.append(go.Scatter(
-                x=[x0, x1, None], y=[y0, y1, None],
-                mode="lines",
-                line=dict(width=2, color=mag_col),
-                hoverinfo="none",
-                showlegend=False,
-            ))
-            # Arrowhead annotation
-            annotations.append(dict(
-                x=x1, y=y1, ax=x0, ay=y0,
-                xref="x", yref="y", axref="x", ayref="y",
-                showarrow=True,
-                arrowhead=2, arrowsize=1.2, arrowwidth=1.5,
-                arrowcolor=mag_col,
-            ))
+        edge_key = (producer, cpd_id, consumer)
+        metric = edge_metric.get(edge_key, 1.0)
+        metric_label = "Flux" if edge_metric_is_flux.get(edge_key, False) else "Support proxy"
+        w = _edge_width(metric)
 
-    # Draw metabolite → consumer (grey dashed)
-    for mag in mag_nodes:
-        for cpd in G.predecessors(mag):
-            if G.nodes[cpd].get("type") != "metabolite":
-                continue
-            x0, y0 = met_pos.get(cpd, (1.0, 0.5))
-            x1, y1 = mag_pos[mag]
-            edge_traces.append(go.Scatter(
-                x=[x0, x1, None], y=[y0, y1, None],
-                mode="lines",
-                line=dict(width=1.5, color="#999", dash="dot"),
-                hoverinfo="none",
-                showlegend=False,
-            ))
-            annotations.append(dict(
-                x=x1, y=y1, ax=x0, ay=y0,
-                xref="x", yref="y", axref="x", ayref="y",
-                showarrow=True,
-                arrowhead=2, arrowsize=1.2, arrowwidth=1.2,
-                arrowcolor="#777",
-            ))
+        x0, y0 = mag_pos[producer]
+        x1, y1 = met_pos[cpd_id]
+        edge_traces.append(go.Scatter(
+            x=[x0, x1, None], y=[y0, y1, None],
+            mode="lines",
+            line=dict(width=w, color=export_color),
+            hoverinfo="none",
+            showlegend=False,
+        ))
+        annotations.append(dict(
+            x=x1, y=y1, ax=x0, ay=y0,
+            xref="x", yref="y", axref="x", ayref="y",
+            showarrow=True,
+            arrowhead=2, arrowsize=1.08,
+            arrowwidth=max(1.0, 0.62 * w),
+            arrowcolor=export_color,
+            opacity=0.92,
+        ))
+        edge_hover_x.append((x0 + x1) / 2)
+        edge_hover_y.append((y0 + y1) / 2)
+        edge_hover_text.append(
+            f"<b>Export</b><br>MAG: {producer}<br>Metabolite: {cpd_name} ({cpd_id})"
+            f"<br>{metric_label}: {metric:.4g}"
+        )
 
-    # ── MAG node trace ────────────────────────────────────────────────────────
-    mag_x  = [mag_pos[m][0] for m in mag_nodes]
-    mag_y  = [mag_pos[m][1] for m in mag_nodes]
-    mag_hover = [
-        (f"<b>{m}</b><br>"
-         f"Products: {mag_sets[m]['n_products'] if isinstance(mag_sets[m].get('n_products'), int) else len(mag_sets[m].get('products', set()))}<br>"
-         f"Substrates: {mag_sets[m]['n_substrates'] if isinstance(mag_sets[m].get('n_substrates'), int) else len(mag_sets[m].get('substrates', set()))}<br>"
-         f"Out-degree: {G.out_degree(m)}<br>"
-         f"In-degree: {G.in_degree(m)}")
-        for m in mag_nodes
-    ]
+        x2, y2 = met_pos[cpd_id]
+        x3, y3 = mag_pos[consumer]
+        edge_traces.append(go.Scatter(
+            x=[x2, x3, None], y=[y2, y3, None],
+            mode="lines",
+            line=dict(width=max(1.0, 0.76 * w), color=import_color),
+            hoverinfo="none",
+            showlegend=False,
+        ))
+        annotations.append(dict(
+            x=x3, y=y3, ax=x2, ay=y2,
+            xref="x", yref="y", axref="x", ayref="y",
+            showarrow=True,
+            arrowhead=2, arrowsize=1.08,
+            arrowwidth=max(1.0, 0.52 * w),
+            arrowcolor=import_color,
+            opacity=0.92,
+        ))
+        edge_hover_x.append((x2 + x3) / 2)
+        edge_hover_y.append((y2 + y3) / 2)
+        edge_hover_text.append(
+            f"<b>Import</b><br>Metabolite: {cpd_name} ({cpd_id})<br>MAG: {consumer}"
+            f"<br>{metric_label}: {metric:.4g}"
+        )
+
+    edge_hover_trace = go.Scatter(
+        x=edge_hover_x,
+        y=edge_hover_y,
+        mode="markers",
+        marker=dict(size=13, color="rgba(0,0,0,0)", line=dict(width=0)),
+        hovertext=edge_hover_text,
+        hoverinfo="text",
+        showlegend=False,
+        name="Edge details",
+    )
+
+    mag_x = [mag_pos[m][0] for m in mag_nodes]
+    mag_y = [mag_pos[m][1] for m in mag_nodes]
+    mag_sizes: list[float] = []
+    mag_hover: list[str] = []
+    for m in mag_nodes:
+        products = len(mag_sets.get(m, {}).get("products", set()))
+        substrates = len(mag_sets.get(m, {}).get("substrates", set()))
+        out_e = sum(1 for _ in G.successors(m))
+        in_e = sum(1 for p in G.predecessors(m) if G.nodes[p].get("type") == "metabolite")
+        complexity = products + substrates
+        mag_sizes.append(min(100.0, max(70.0, 70.0 + 2.2 * math.sqrt(max(complexity, 1)))))
+        mag_hover.append(
+            f"<b>{m}</b><br>"
+            f"Total exports: {products}<br>"
+            f"Total imports: {substrates}<br>"
+            f"Outgoing edges: {out_e}<br>"
+            f"Incoming edges: {in_e}"
+        )
+
     mag_trace = go.Scatter(
         x=mag_x, y=mag_y,
         mode="markers+text",
         text=mag_nodes,
-        textposition="middle left",
-        textfont=dict(size=13, color="#2d3748"),
+        textposition="middle center",
+        textfont=dict(size=12, color="#0f172a"),
         marker=dict(
-            size=22,
+            size=mag_sizes,
             color=[mag_color_map[m] for m in mag_nodes],
-            line=dict(width=2, color="#fff"),
+            line=dict(width=3, color="#f8fafc"),
             symbol="circle",
+            opacity=0.95,
         ),
         hovertext=mag_hover,
         hoverinfo="text",
-        name="MAGs",
+        name="MAG (genome)",
     )
 
-    # ── Metabolite node trace ─────────────────────────────────────────────────
     met_x = [met_pos[c][0] for c in met_nodes]
     met_y = [met_pos[c][1] for c in met_nodes]
-    met_labels = [cpd_label.get(c, c) for c in met_nodes]
-    met_hover  = [
-        (f"<b>{cpd_label.get(c, c)}</b> ({c})<br>"
-         f"Produced by: {', '.join(G.predecessors(c))}<br>"
-         f"Consumed by: {', '.join(G.successors(c))}")
+    met_sizes = [max(13.0, min(16.0, 14.0 + 0.25 * (G.in_degree(c) + G.out_degree(c)))) for c in met_nodes]
+    met_hover = [
+        f"<b>{cpd_label.get(c, c)}</b><br>ID: {c}<br>"
+        f"Produced by MAGs: {', '.join(list(G.predecessors(c))[:10]) or '—'}<br>"
+        f"Consumed by MAGs: {', '.join(list(G.successors(c))[:10]) or '—'}"
         for c in met_nodes
     ]
-    # Size metabolite nodes by number of MAGs they connect
-    met_sizes = [
-        10 + 4 * (G.in_degree(c) + G.out_degree(c)) for c in met_nodes
-    ]
+    def _met_label(c: str) -> str:
+        label = cpd_label.get(c)
+        if not label:
+            label = c
+        return label if len(label) < 20 else label[:17] + "…"
+
     met_trace = go.Scatter(
         x=met_x, y=met_y,
         mode="markers+text",
-        text=met_labels,
+        text=[_met_label(c) for c in met_nodes],
         textposition="middle right",
-        textfont=dict(size=11, color="#4a5568"),
+        textfont=dict(size=10, color="#334155"),
         marker=dict(
             size=met_sizes,
-            color="#ecc94b",
-            line=dict(width=2, color="#b7791f"),
+            color="#fde68a",
+            line=dict(width=1.8, color="#b45309"),
             symbol="diamond",
         ),
         hovertext=met_hover,
         hoverinfo="text",
-        name="Metabolites",
+        name="Exchanged metabolite",
     )
 
-    # ── Legend: dummy traces for MAGs ─────────────────────────────────────────
-    legend_traces: list[Any] = []
-    for mag, col in zip(mag_nodes, mag_colors):
-        legend_traces.append(go.Scatter(
-            x=[None], y=[None],
-            mode="markers",
-            marker=dict(size=12, color=col, symbol="circle"),
-            name=mag,
-        ))
+    flow_legend_traces = [
+        go.Scatter(x=[None], y=[None], mode="lines", line=dict(color=export_color, width=3),
+                   name="Export (MAG → metabolite)", hoverinfo="none"),
+        go.Scatter(x=[None], y=[None], mode="lines", line=dict(color=import_color, width=3),
+                   name="Import (metabolite → MAG)", hoverinfo="none"),
+    ]
 
-    # ── Figure assembly ────────────────────────────────────────────────────────
-    all_traces = edge_traces + [mag_trace, met_trace] + legend_traces
-
-    n_edges_str = (
-        f"{sum(1 for e in edges)} hand-off edges"
-        f" | {n_mag} MAGs | {n_met} metabolites"
-    )
-
-    fig = go.Figure(data=all_traces)
+    n_edges_str = f"{len(edges)} hand-off pairs | {n_mag} MAGs | {n_met} metabolites"
+    fig = go.Figure(data=edge_traces + [edge_hover_trace, met_trace, mag_trace] + flow_legend_traces)
+    lim = mag_radius + 1.2
     fig.update_layout(
         title=dict(
-            text=f"Metabolic Cross-Feeding Network<br>"
-                 f"<sup>{n_edges_str}</sup>",
-            font=dict(size=18),
+            text=(
+                "Community Cross-Feeding Network — Giant Factory Layout<br>"
+                f"<sup>{n_edges_str}</sup>"
+            ),
+            font=dict(size=19),
             x=0.5,
         ),
-        xaxis=dict(
-            showgrid=False, zeroline=False, showticklabels=False,
-            range=[-0.45, 1.45],
-        ),
-        yaxis=dict(
-            showgrid=False, zeroline=False, showticklabels=False,
-        ),
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-lim, lim]),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-lim, lim]),
         annotations=annotations,
         plot_bgcolor="#f8fafc",
         paper_bgcolor="#f8fafc",
         hovermode="closest",
         legend=dict(
-            title="MAGs",
+            title="Flow semantics",
             borderwidth=1,
             bordercolor="#e2e8f0",
             bgcolor="rgba(255,255,255,0.9)",
             x=1.02, y=1.0,
         ),
-        margin=dict(l=160, r=200, t=90, b=40),
-        height=max(600, 80 * max(n_mag, n_met)),
+        margin=dict(l=30, r=210, t=95, b=30),
+        height=max(780, 120 * max(4, n_mag)),
     )
 
-    # X-axis label annotations
     fig.add_annotation(
-        x=0.0, y=1.05, xref="paper", yref="paper",
-        text="<b>MAGs (Producers)</b>",
-        showarrow=False, font=dict(size=13, color="#2c5282"),
-        xanchor="center",
-    )
-    fig.add_annotation(
-        x=1.0, y=1.05, xref="paper", yref="paper",
-        text="<b>Metabolites (Exchanged)</b>",
-        showarrow=False, font=dict(size=13, color="#744210"),
-        xanchor="center",
+        x=0.5,
+        y=1.08,
+        xref="paper",
+        yref="paper",
+        text=(
+            "<b>Design:</b> giant MAG circles are core players; small diamonds are exchanged metabolites. "
+            "Edge color indicates export/import direction; edge width scales with measured flux when available "
+            "or structural support otherwise."
+        ),
+        showarrow=False,
+        font=dict(size=11, color="#334155"),
     )
 
     out_path = out_dir / "crossfeed_network.html"
     fig.write_html(
         str(out_path),
         include_plotlyjs="cdn",
-        config={"displayModeBar": True, "scrollZoom": True},
+        config={"displayModeBar": True, "scrollZoom": True, "displaylogo": False},
     )
     log.info("  Saved: %s", out_path)
     return out_path
@@ -1293,130 +1377,6 @@ def compute_keystone_report(
 
 
 # ---------------------------------------------------------------------------
-# MAG-mode index.html hub
-# ---------------------------------------------------------------------------
-
-
-def generate_mag_index_html(
-    out_dir: Path,
-    summary: dict,
-    log: logging.Logger,
-) -> Path:
-    """Write index.html — a 4-tab hub page for MAG cross-feeding outputs."""
-    from datetime import datetime
-
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-    tab_defs = [
-        ("network",  "🕸 Network",  "crossfeed_network.html"),
-        ("sankey",   "🌊 Sankey",   "crossfeed_sankey.html"),
-        ("heatmap",  "🗺 Heatmap",   "crossfeed_heatmap.html"),
-        ("report",   "🔑 Report",   "keystone_report.html"),
-    ]
-
-    tab_buttons = ""
-    tab_panels  = ""
-    first_active = None
-
-    for tid, label, fname in tab_defs:
-        fpath = out_dir / fname
-        exists = fpath.is_file()
-        disabled = "" if exists else ' class="disabled"'
-        active = ""
-        if exists and first_active is None:
-            active = " active"
-            first_active = tid
-        tab_buttons += (
-            f'  <button id="btn-{tid}"{disabled} class="tab-btn{active}" '
-            f'onclick="showTab(\'{tid}\')">'
-            f'    {label}{"" if exists else " (unavailable)"}\n'
-            f'  </button>\n'
-        )
-        display = "block" if (exists and first_active == tid) else "none"
-        src_attr = f'src="{fname}"' if exists else ''
-        tab_panels += (
-            f'<div id="tab-{tid}" class="tab-panel" style="display:{display}">\n'
-            + (f'  <iframe {src_attr} class="viz-frame"></iframe>\n' if exists else
-               '  <div class="unavailable">Output file not generated.</div>\n')
-            + f'</div>\n'
-        )
-
-    n_mags      = summary.get("n_mags",       0)
-    n_edges     = summary.get("n_edges",      0)
-    n_mets      = summary.get("n_metabolites",0)
-    n_keystone  = summary.get("n_keystone",   0)
-
-    html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MAG Cross-Feeding Network</title>
-<style>
-  * {{box-sizing:border-box; margin:0; padding:0;}}
-  body {{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; background:#f0f4f8; color:#2d3748;}}
-  header {{background:linear-gradient(135deg,#1a202c 0%,#2d3748 100%);
-           color:#fff; padding:18px 28px; display:flex; align-items:center; gap:16px;}}
-  header h1 {{font-size:1.25rem; font-weight:700;}}
-  header .sub {{font-size:.8rem; color:#a0aec0; margin-top:3px;}}
-  .stat-bar {{display:flex; gap:12px; padding:14px 28px; background:#fff;
-              border-bottom:1px solid #e2e8f0; flex-wrap:wrap;}}
-  .stat-card {{background:#f7fafc; border:1px solid #e2e8f0; border-radius:8px;
-               padding:10px 18px; min-width:110px; text-align:center;}}
-  .stat-card .val {{font-size:1.6rem; font-weight:700; color:#38b2ac;}}
-  .stat-card .lbl {{font-size:.72rem; color:#718096; margin-top:2px;}}
-  .tabs {{display:flex; gap:4px; padding:12px 28px 0; background:#fff;
-          border-bottom:2px solid #e2e8f0;}}
-  .tab-btn {{border:none; background:none; cursor:pointer; padding:9px 18px;
-             font-size:.88rem; border-radius:6px 6px 0 0; transition:all .15s;
-             color:#4a5568; font-weight:500;}}
-  .tab-btn:hover:not(.disabled) {{background:#edf2f7;}}
-  .tab-btn.active {{background:#38b2ac; color:#fff;}}
-  .tab-btn.disabled {{color:#cbd5e0; cursor:not-allowed;}}
-  .tab-panel {{padding:0;}}
-  .viz-frame {{width:100%; height:calc(100vh - 178px); border:none; display:block;
-               background:#fff;}}
-  .unavailable {{padding:48px; text-align:center; color:#a0aec0; font-size:.95rem;}}
-  footer {{text-align:center; color:#a0aec0; font-size:.74rem; padding:10px;
-           background:#f0f4f8;}}
-</style>
-</head>
-<body>
-<header>
-  <div>
-    <h1>🧬 MAG Cross-Feeding Network &mdash; Community Metabolic Analysis</h1>
-    <div class="sub">Generated: {ts}</div>
-  </div>
-</header>
-<div class="stat-bar">
-  <div class="stat-card"><div class="val">{n_mags}</div><div class="lbl">MAGs</div></div>
-  <div class="stat-card"><div class="val">{n_edges}</div><div class="lbl">Cross-feeding Edges</div></div>
-  <div class="stat-card"><div class="val">{n_mets}</div><div class="lbl">Exchanged Metabolites</div></div>
-  <div class="stat-card"><div class="val">{n_keystone}</div><div class="lbl">Keystone Species</div></div>
-</div>
-<div class="tabs">
-{tab_buttons}</div>
-{tab_panels}
-<footer>MAG Cross-Feeding Network Analyzer &mdash; {ts}</footer>
-<script>
-function showTab(id) {{
-  document.querySelectorAll('.tab-panel').forEach(p => p.style.display='none');
-  document.querySelectorAll('.tab-btn:not(.disabled)').forEach(b => b.classList.remove('active'));
-  var panel = document.getElementById('tab-' + id);
-  if (panel) panel.style.display = 'block';
-  var btn = document.getElementById('btn-' + id);
-  if (btn) btn.classList.add('active');
-}}
-</script>
-</body>
-</html>
-"""
-
-    out_path = out_dir / "index.html"
-    out_path.write_text(html, encoding="utf-8")
-    log.info("  Saved MAG index hub: %s", out_path)
-    return out_path
-# ---------------------------------------------------------------------------
 # Master orchestrator
 # ---------------------------------------------------------------------------
 
@@ -1548,21 +1508,6 @@ def run_crossfeed_analysis(
     log.info("  KEGG cache saved: %s  (%d entries)", cache_path, len(cache))
 
     log.info("Cross-feeding analysis complete.  %d output(s) written.", len(outputs))
-
-    # 11. Generate summary with keystone info & write index hub
-    _summary = {}
-    if json_path and json_path.is_file():
-        import json as _json
-        try:
-            _summary = _json.loads(json_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    if keystone_data:
-        _summary["n_keystone"] = keystone_data.get("n_keystone", 0)
-    else:
-        _summary["n_keystone"] = 0
-    index_path = generate_mag_index_html(out_dir, _summary, log)
-    outputs.append(index_path)
 
     return {
         "edges":        edges,

@@ -21,17 +21,17 @@ Built-in test accessions (E. coli K-12 only, as requested)
 Usage
 -----
     # Fetch the default test set (E. coli K-12)
-    python fetch_ncbi.py
+    python src/fetch_ncbi.py
 
     # Fetch one specific accession into a custom directory
-    python fetch_ncbi.py --accessions NC_000913.3 --out-dir data/ecoli
+    python src/fetch_ncbi.py --accessions NC_000913.3 --out-dir data/ecoli
 
     # Fetch multiple accessions with your NCBI email
-    python fetch_ncbi.py --accessions NC_000913.3 NC_002695.2 \\
+    python src/fetch_ncbi.py --accessions NC_000913.3 NC_002695.2 \\
                          --email you@example.com --out-dir data/
 
     # Skip download if files already exist (idempotent)
-    python fetch_ncbi.py --skip-existing
+    python src/fetch_ncbi.py --skip-existing
 
 Requirements
 ------------

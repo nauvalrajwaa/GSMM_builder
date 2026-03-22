@@ -16,7 +16,7 @@ Workflow
 
 Usage
 -----
-    python generate_model.py [--fasta genomics.fasta] [--gbk genomics.gbk]
+    python src/generate_model.py [--fasta genomics.fasta] [--gbk genomics.gbk]
                              [--output output/model.xml] [--gap-fill medium]
                              [--visualize] [--viz-dir output/viz]
 

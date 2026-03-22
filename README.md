@@ -32,6 +32,7 @@ carve --download
 
 | Script | Purpose |
 |--------|---------|
+| `main.py` | **All-in-one runner**: fetch → model → visualize → crossfeed in one command |
 | `fetch_ncbi.py` | Download FASTA + GenBank from NCBI RefSeq by accession |
 | `generate_model.py` | Full GSMM pipeline: extract proteins → CarveMe → COBRApy QC |
 | `visualize_model.py` | Comprehensive model visualization (standalone or via pipeline) |
@@ -43,20 +44,67 @@ carve --download
 
 ## Quick start: test with real data (E. coli K-12)
 
-The fastest way to verify the full pipeline using the built-in *E. coli* K-12
-test dataset:
+The fastest all-in-one way to run fetch + model + visualization + cross-feeding
+using the built-in *E. coli* K-12 test dataset:
 
 ```bash
 # One command – downloads genome, builds model, generates all visualizations
-python run_tests.py --email your@email.com
+python main.py --email your@email.com
 ```
 
 This will:
-1. Download `NC_000913.3` (*E. coli* K-12 MG1655) from NCBI into `tests/NC_000913_3/`
-2. Run the GSMM pipeline; model saved to `tests/NC_000913_3/output/model.xml`
-3. Generate all visualizations in `tests/NC_000913_3/output/viz/`
-4. Build MAG annotations automatically from fetched GenBank files and run cross-feeding
-5. Print a pass/fail summary table and write `tests/test_report.json`
+1. Download `NC_000913.3` (*E. coli* K-12 MG1655) from NCBI into `output/all_in_one/fetch/`
+2. Run GSMM reconstruction for each accession
+3. Generate full visualization outputs per accession
+4. Run cross-feeding network analysis with giant-factory interactive view
+5. Print a per-accession run summary
+
+---
+
+## One-command pipeline runner (`main.py`)
+
+`main.py` orchestrates the complete workflow from repository root:
+
+```bash
+python main.py --email your@email.com
+```
+
+### Common `main.py` commands
+
+```bash
+# Custom accession list
+python main.py --accessions NC_000913.3 NC_002695.2 --email your@email.com
+
+# Set output root directory
+python main.py --email your@email.com --run-dir output/my_run
+
+# Run gap-filling during reconstruction
+python main.py --email your@email.com --gap-fill M9
+
+# Skip selected stages
+python main.py --email your@email.com --skip-download
+python main.py --email your@email.com --skip-crossfeed
+
+# Continue processing remaining accessions after one fails
+python main.py --accessions NC_000913.3 NC_002695.2 --email your@email.com --continue-on-error
+```
+
+### `main.py` options
+
+```
+  --accessions ACC [ACC ...]   RefSeq accession(s) to process (default: NC_000913.3)
+  --email EMAIL                NCBI email for fetch step
+  --run-dir DIR                Output root for the full run (default: output/all_in_one)
+  --python PYTHON              Python interpreter used to invoke src scripts
+  --gap-fill MEDIUM            Gap-fill medium for generate_model.py (e.g. M9)
+  --max-api-kos N              Max KO terms resolved in crossfeed step (default: 220)
+  --skip-download              Skip fetch step
+  --skip-generate              Skip model generation step
+  --skip-visualize             Skip visualization step
+  --skip-crossfeed             Skip crossfeed step
+  --continue-on-error          Continue remaining accessions after one fails
+  --verbose / -v               Enable DEBUG logging
+```
 
 ---
 
@@ -64,18 +112,18 @@ This will:
 
 ```bash
 # Fetch the built-in E. coli K-12 test genome
-python fetch_ncbi.py --email your@email.com
+python src/fetch_ncbi.py --email your@email.com
 
 # Fetch a specific accession
-python fetch_ncbi.py --accessions NC_000913.3 --out-dir data/ecoli \
+python src/fetch_ncbi.py --accessions NC_000913.3 --out-dir data/ecoli \
                      --email your@email.com
 
 # Fetch multiple accessions
-python fetch_ncbi.py --accessions NC_000913.3 NC_002695.2 \
+python src/fetch_ncbi.py --accessions NC_000913.3 NC_002695.2 \
                      --out-dir data/ --email your@email.com
 
 # Skip download if files already exist (idempotent)
-python fetch_ncbi.py --skip-existing --email your@email.com
+python src/fetch_ncbi.py --skip-existing --email your@email.com
 ```
 
 ### fetch_ncbi.py options
@@ -105,19 +153,19 @@ python fetch_ncbi.py --skip-existing --email your@email.com
 
 ```bash
 # Run all built-in tests
-python run_tests.py --email your@email.com
+python src/run_tests.py --email your@email.com
 
 # Re-run without re-downloading (data already in tests/)
-python run_tests.py --skip-download
+python src/run_tests.py --skip-download
 
 # Run with gap-filling on M9 medium
-python run_tests.py --email your@email.com --gap-fill M9
+python src/run_tests.py --email your@email.com --gap-fill M9
 
 # Test a custom accession
-python run_tests.py --accessions NC_002695.2 --email your@email.com
+python src/run_tests.py --accessions NC_002695.2 --email your@email.com
 
 # Keep intermediate files (proteins.faa) after run
-python run_tests.py --keep-intermediates --email your@email.com
+python src/run_tests.py --keep-intermediates --email your@email.com
 ```
 
 ### run_tests.py options
@@ -177,7 +225,7 @@ tests/test_report.json           ← JSON pass/fail report
 | `genomics.fasta` | Genomic nucleotide or protein FASTA |
 | `genomics.gbk` | Annotated GenBank file (CDS features required) |
 
-Place both files in the project root (same directory as `generate_model.py`),
+Place both files in the project root,
 or use `fetch_ncbi.py` to download them automatically.
 
 ---
@@ -186,12 +234,12 @@ or use `fetch_ncbi.py` to download them automatically.
 
 ### Minimal (default paths, no gap-filling)
 ```bash
-python generate_model.py
+python src/generate_model.py
 ```
 
 ### Custom paths + gap-filling on M9 minimal medium
 ```bash
-python generate_model.py \
+python src/generate_model.py \
     --fasta  genomics.fasta \
     --gbk    genomics.gbk \
     --output output/my_model.xml \
@@ -200,22 +248,22 @@ python generate_model.py \
 
 ### With a log file
 ```bash
-python generate_model.py --log-file pipeline.log
+python src/generate_model.py --log-file pipeline.log
 ```
 
 ### With comprehensive visualizations
 ```bash
-python generate_model.py --visualize
+python src/generate_model.py --visualize
 ```
 
 ### Custom visualization output directory
 ```bash
-python generate_model.py --visualize --viz-dir output/my_viz
+python src/generate_model.py --visualize --viz-dir output/my_viz
 ```
 
 ### All options
 ```
-usage: generate_model.py [-h] [--fasta FASTA] [--gbk GBK]
+usage: src/generate_model.py [-h] [--fasta FASTA] [--gbk GBK]
                          [--output OUTPUT] [--gap-fill MEDIUM]
                          [--log-file LOG_FILE]
                          [--visualize] [--viz-dir DIR]
@@ -266,12 +314,11 @@ All written to `output/viz/` by default (override with `--viz-dir`).
 | `flux_distribution.png` | Bar chart of top-30 reactions by absolute FBA flux |
 | `reaction_network.html` | Interactive Plotly bipartite reaction–metabolite network |
 | `dashboard.html` | Single-page interactive dashboard (stats + subsystems + fluxes) |
-| `mutation_analysis.html` | Knockout / knockin gene analysis scatter + bar charts |
+| `mutation_analysis.html` | Subsystem vulnerability KO plot + linked click-to-network highlighting |
 | `escher_map.html` | Interactive Escher metabolic map with FBA flux overlay |
 | `gene_config_report.html` | Gene config KO/KI Plotly report (if `gene_config.json` present) |
 | `model_summary.csv` | Machine-readable table of key model statistics |
 | `index.html` | Unified single-page hub: Overview, Interactive Reports, Environment Editor, Cross-Feeding Network |
-| `crossfeed/index.html` | MAG hub: 4-tab page (Network, Sankey, Heatmap, Report) with stat cards |
 | `crossfeed/crossfeed_network.html` | Bipartite cross-feeding network — taxonomy colors, click-to-highlight |
 | `crossfeed/crossfeed_sankey.html` | Sankey metabolic flow diagram (optional abundance weighting) |
 | `crossfeed/crossfeed_heatmap.html` | Pathway completeness heatmap: KO presence per MAG |
@@ -285,11 +332,11 @@ All written to `output/viz/` by default (override with `--viz-dir`).
 ## Standalone visualization (existing model)
 
 ```bash
-python visualize_model.py --model output/model.xml --out-dir output/viz
+python src/visualize_model.py --model output/model.xml --out-dir output/viz
 ```
 
 **Auto-detected extras** — place these files in the project root alongside
-`visualize_model.py` and they are picked up automatically:
+the project root and they are picked up automatically:
 
 | File | Effect |
 |------|--------|
@@ -340,68 +387,68 @@ Column names `mag_id` and `ko_id` are the defaults; override with
 
 ```bash
 # Generate the built-in sample fixture (8 gut-microbiome MAGs, 57 KO terms)
-python crossfeed_network.py --generate-sample my_mags.csv
+python src/crossfeed_network.py --generate-sample my_mags.csv
 
 # Build cross-feeding network from the sample
-python crossfeed_network.py --input my_mags.csv --out-dir output/crossfeed
+python src/crossfeed_network.py --input my_mags.csv --out-dir output/crossfeed
 
 # Use your own annotation table
-python crossfeed_network.py --input my_real_mags.csv --out-dir output/crossfeed
+python src/crossfeed_network.py --input my_real_mags.csv --out-dir output/crossfeed
 ```
 
 ### Common commands
 
 ```bash
 # Minimal: just an input table (output goes to output/crossfeed)
-python crossfeed_network.py --input mag_annotations.csv
+python src/crossfeed_network.py --input mag_annotations.csv
 
 # Custom output directory
-python crossfeed_network.py \
+python src/crossfeed_network.py \
     --input  mag_annotations.csv \
     --out-dir results/crossfeed
 
 # TSV input with non-default column names
-python crossfeed_network.py \
+python src/crossfeed_network.py \
     --input   annotation_table.tsv \
     --mag-col bin_id \
     --ko-col  kegg_ko
 
 # Reuse a previously downloaded KEGG cache (avoids repeated API calls)
-python crossfeed_network.py \
+python src/crossfeed_network.py \
     --input  mag_annotations.csv \
     --cache  output/crossfeed/kegg_cache.json
 
 # Limit the number of unique KO terms sent to the KEGG API
 # (useful for large datasets or rate-limited environments)
-python crossfeed_network.py \
+python src/crossfeed_network.py \
     --input       mag_annotations.csv \
     --max-api-kos 200
 
 # Fully offline: set max-api-kos to 0 and supply a pre-built cache
-python crossfeed_network.py \
+python src/crossfeed_network.py \
     --input       mag_annotations.csv \
     --cache       my_kegg_cache.json \
     --max-api-kos 0
 
 # Verbose logging (shows every KEGG API call and graph detail)
-python crossfeed_network.py \
+python src/crossfeed_network.py \
     --input mag_annotations.csv \
     --verbose
 
 # Generate the sample fixture and immediately analyse it
-python crossfeed_network.py --generate-sample /tmp/sample.csv
-python crossfeed_network.py --input /tmp/sample.csv --out-dir /tmp/crossfeed_out
+python src/crossfeed_network.py --generate-sample /tmp/sample.csv
+python src/crossfeed_network.py --input /tmp/sample.csv --out-dir /tmp/crossfeed_out
 ```
 
 ### Integrate with an existing GSMM visualization run
 
-Place `mag_annotations.csv` in the project root (next to `visualize_model.py`).
+Place `mag_annotations.csv` in the project root.
 It is auto-discovered and the cross-feeding network is appended as a new tab in
 `index.html`:
 
 ```bash
 # GSMM pipeline + visualizations + cross-feeding network (all in one)
-python generate_model.py \
+python src/generate_model.py \
     --fasta  genome.fna \
     --gbk    genome.gbk \
     --output output/model.xml \

@@ -23,7 +23,7 @@ Produces (all outputs written to ``out_dir``):
 
 Usage (standalone)
 ------------------
-    python visualize_model.py --model output/model.xml --out-dir output/viz
+    python src/visualize_model.py --model output/model.xml --out-dir output/viz
 
 Usage (from generate_model.py)
 -------------------------------
@@ -73,6 +73,7 @@ except ImportError:
 
 try:
     import pandas as pd
+    from collections import Counter
     _HAS_PD = True
 except ImportError:
     _HAS_PD = False
@@ -348,6 +349,10 @@ def plot_flux_distribution(
 # 6. Interactive Plotly network graph
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# 6b. Interactive Plotly dashboard (overview of all key statistics)
+# ---------------------------------------------------------------------------
+
 def plot_reaction_network(
     model: "cobra.Model",
     out_dir: Path,
@@ -355,9 +360,13 @@ def plot_reaction_network(
     max_nodes: int = 300,
 ) -> None:
     """
-    Build a bipartite reaction-metabolite network and export it as an
-    interactive Plotly HTML file.  Large models are sampled to ``max_nodes``
-    reactions to keep the browser responsive.
+    Build a semantically-clustered reaction-metabolite network and export it as
+    interactive HTML.
+
+    Enhancements:
+      - Reactions grouped by subsystem/pathway with consistent colors.
+      - Force-directed layout with subsystem hub attraction.
+      - Dual view toggle (detailed nodes vs subsystem modules) as semantic zoom.
     """
     if not _HAS_PLOTLY:
         log.warning("plotly not installed – skipping interactive network graph.")
@@ -366,103 +375,489 @@ def plot_reaction_network(
         log.warning("networkx not installed – skipping interactive network graph.")
         return
 
-    log.info("  Building reaction network graph …")
+    from collections import Counter, defaultdict
+    import json as _json
+    import math
+    import random
 
-    # Sample reactions if model is very large
+    log.info("  Building reaction network graph (semantic clustering) …")
+
     reactions = list(model.reactions)
     if len(reactions) > max_nodes:
-        import random, math
         random.seed(42)
         reactions = random.sample(reactions, max_nodes)
         log.info("  (sampled %d / %d reactions for legibility)", max_nodes, len(model.reactions))
 
     G = nx.DiGraph()
-
-    # Add nodes
     for rxn in reactions:
-        G.add_node(rxn.id, node_type="reaction",
-                   label=rxn.name or rxn.id,
-                   subsystem=rxn.subsystem or "unknown")
-        for met in rxn.reactants:
-            G.add_node(met.id, node_type="metabolite",
-                       label=met.name or met.id,
-                       compartment=met.compartment or "?")
-            G.add_edge(met.id, rxn.id)
-        for met in rxn.products:
-            G.add_node(met.id, node_type="metabolite",
-                       label=met.name or met.id,
-                       compartment=met.compartment or "?")
-            G.add_edge(rxn.id, met.id)
-
-    # Layout
-    try:
-        pos = nx.kamada_kawai_layout(G)
-    except Exception:
-        pos = nx.spring_layout(G, seed=42)
-
-    # Separate node types
-    rxn_nodes  = [n for n, d in G.nodes(data=True) if d.get("node_type") == "reaction"]
-    met_nodes  = [n for n, d in G.nodes(data=True) if d.get("node_type") == "metabolite"]
-
-    def _make_node_trace(nodes: list[str], color: str, symbol: str,
-                         size: int, name: str) -> "go.Scatter":
-        xs, ys, texts = [], [], []
-        for n in nodes:
-            x, y = pos[n]
-            xs.append(x); ys.append(y)
-            data = G.nodes[n]
-            texts.append(
-                f"<b>{data.get('label', n)}</b><br>ID: {n}<br>"
-                + (f"Subsystem: {data.get('subsystem','')}" if data.get("node_type") == "reaction"
-                   else f"Compartment: {data.get('compartment','')}")
-            )
-        return go.Scatter(
-            x=xs, y=ys, mode="markers",
-            marker=dict(size=size, color=color, symbol=symbol,
-                        line=dict(width=0.5, color="white")),
-            text=texts, hoverinfo="text", name=name,
+        subsystem = (rxn.subsystem or "Unknown subsystem").strip() or "Unknown subsystem"
+        G.add_node(
+            rxn.id,
+            node_type="reaction",
+            label=rxn.name or rxn.id,
+            subsystem=subsystem,
         )
+        for met in rxn.reactants:
+            G.add_node(
+                met.id,
+                node_type="metabolite",
+                label=met.name or met.id,
+                compartment=met.compartment or "?",
+            )
+            G.add_edge(met.id, rxn.id, direction="import")
+        for met in rxn.products:
+            G.add_node(
+                met.id,
+                node_type="metabolite",
+                label=met.name or met.id,
+                compartment=met.compartment or "?",
+            )
+            G.add_edge(rxn.id, met.id, direction="export")
 
-    edge_x, edge_y = [], []
+    rxn_nodes = [n for n, d in G.nodes(data=True) if d.get("node_type") == "reaction"]
+    met_nodes = [n for n, d in G.nodes(data=True) if d.get("node_type") == "metabolite"]
+
+    if not rxn_nodes:
+        log.warning("  No reaction nodes available – skipping reaction network plot.")
+        return
+
+    subsystem_counts = Counter(G.nodes[n].get("subsystem", "Unknown subsystem") for n in rxn_nodes)
+    subsystem_order = [s for s, _ in subsystem_counts.most_common()]
+    n_subsystems = max(len(subsystem_order), 1)
+
+    palette = [
+        "#2563eb", "#14b8a6", "#f97316", "#a855f7", "#ef4444", "#22c55e", "#f59e0b",
+        "#0ea5e9", "#d946ef", "#84cc16", "#4f46e5", "#e11d48", "#06b6d4", "#7c3aed",
+        "#16a34a", "#ea580c", "#3b82f6", "#ca8a04", "#0f766e", "#6d28d9",
+    ]
+    subsystem_color = {sub: palette[i % len(palette)] for i, sub in enumerate(subsystem_order)}
+
+    # Build an auxiliary layout graph with subsystem hubs to create semantic clusters.
+    layout_graph = nx.Graph()
+    layout_graph.add_nodes_from(G.nodes())
     for u, v in G.edges():
-        x0, y0 = pos[u]; x1, y1 = pos[v]
+        layout_graph.add_edge(u, v, weight=1.0)
+
+    hub_radius = max(2.0, 0.62 * math.sqrt(n_subsystems) + 0.8)
+    hub_nodes: dict[str, str] = {}
+    fixed_hubs: list[str] = []
+    initial_pos: dict[str, tuple[float, float]] = {}
+    rnd = random.Random(42)
+
+    for i, sub in enumerate(subsystem_order):
+        hub = f"__subsystem_hub__{i}"
+        hub_nodes[sub] = hub
+        layout_graph.add_node(hub)
+        angle = (2.0 * math.pi * i) / n_subsystems
+        hx = hub_radius * math.cos(angle)
+        hy = hub_radius * math.sin(angle)
+        initial_pos[hub] = (hx, hy)
+        fixed_hubs.append(hub)
+
+    for rxn in rxn_nodes:
+        sub = G.nodes[rxn].get("subsystem", "Unknown subsystem")
+        hub = hub_nodes.get(sub)
+        if hub:
+            layout_graph.add_edge(rxn, hub, weight=6.0)
+            hx, hy = initial_pos[hub]
+            initial_pos[rxn] = (hx + rnd.uniform(-0.25, 0.25), hy + rnd.uniform(-0.25, 0.25))
+
+    for met in met_nodes:
+        neighbors = [n for n in (list(G.predecessors(met)) + list(G.successors(met))) if n in initial_pos]
+        if neighbors:
+            mx = sum(initial_pos[n][0] for n in neighbors) / len(neighbors)
+            my = sum(initial_pos[n][1] for n in neighbors) / len(neighbors)
+            initial_pos[met] = (mx + rnd.uniform(-0.18, 0.18), my + rnd.uniform(-0.18, 0.18))
+        else:
+            initial_pos[met] = (rnd.uniform(-0.4, 0.4), rnd.uniform(-0.4, 0.4))
+
+    try:
+        pos_all = nx.spring_layout(
+            layout_graph,
+            seed=42,
+            pos=initial_pos,
+            fixed=fixed_hubs,
+            iterations=280,
+            k=1.35 / math.sqrt(max(layout_graph.number_of_nodes(), 4)),
+            weight="weight",
+        )
+    except Exception:
+        try:
+            pos_all = nx.kamada_kawai_layout(G)
+        except Exception:
+            pos_all = nx.spring_layout(G, seed=42)
+
+    pos = {n: pos_all[n] for n in G.nodes() if n in pos_all}
+
+    # Assign metabolites to dominant neighboring subsystem (for semantic coloring).
+    met_dominant_subsystem: dict[str, str] = {}
+    for met in met_nodes:
+        neighbor_reactions = [
+            n for n in (list(G.predecessors(met)) + list(G.successors(met)))
+            if G.nodes[n].get("node_type") == "reaction"
+        ]
+        if not neighbor_reactions:
+            met_dominant_subsystem[met] = "Unknown subsystem"
+            continue
+        vote = Counter(G.nodes[r].get("subsystem", "Unknown subsystem") for r in neighbor_reactions)
+        met_dominant_subsystem[met] = vote.most_common(1)[0][0]
+
+    # Detailed view traces
+    edge_x, edge_y = [], []
+    rxn_to_metabolites: dict[str, set[str]] = defaultdict(set)
+    rxn_to_edge_segments: dict[str, list[tuple[float, float, float, float]]] = defaultdict(list)
+    for u, v in G.edges():
+        if u not in pos or v not in pos:
+            continue
+        x0, y0 = pos[u]
+        x1, y1 = pos[v]
         edge_x += [x0, x1, None]
         edge_y += [y0, y1, None]
 
+        u_type = G.nodes[u].get("node_type")
+        v_type = G.nodes[v].get("node_type")
+        if u_type == "reaction" and v_type == "metabolite":
+            rxn_to_metabolites[u].add(v)
+            rxn_to_edge_segments[u].append((x0, y0, x1, y1))
+        elif u_type == "metabolite" and v_type == "reaction":
+            rxn_to_metabolites[v].add(u)
+            rxn_to_edge_segments[v].append((x0, y0, x1, y1))
+
     edge_trace = go.Scatter(
-        x=edge_x, y=edge_y, mode="lines",
-        line=dict(width=0.5, color="#aaa"),
-        hoverinfo="none", showlegend=False,
+        x=edge_x,
+        y=edge_y,
+        mode="lines",
+        line=dict(width=0.7, color="#9ca3af"),
+        hoverinfo="none",
+        name="Reaction links",
+        showlegend=False,
+        visible=True,
     )
 
-    fig = go.Figure(
-        data=[
-            edge_trace,
-            _make_node_trace(met_nodes,  "#55A868", "circle",  6, "Metabolite"),
-            _make_node_trace(rxn_nodes,  "#4C72B0", "square",  9, "Reaction"),
-        ],
-        layout=go.Layout(
-            title=dict(text=f"Reaction–Metabolite Network  ({len(G.nodes())} nodes, "
-                            f"{len(G.edges())} edges)",
-                       font=dict(size=15)),
-            showlegend=True,
-            hovermode="closest",
-            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-            plot_bgcolor="white",
-            paper_bgcolor="white",
-            margin=dict(l=20, r=20, t=60, b=20),
+    highlight_edge_trace = go.Scatter(
+        x=[],
+        y=[],
+        mode="lines",
+        line=dict(width=2.8, color="#ef4444"),
+        hoverinfo="none",
+        name="Selected pathways",
+        showlegend=False,
+        visible=True,
+        opacity=0.0,
+    )
+
+    rxn_x, rxn_y, rxn_hover, rxn_color, rxn_ids_for_plot = [], [], [], [], []
+    for n in rxn_nodes:
+        if n not in pos:
+            continue
+        x, y = pos[n]
+        data = G.nodes[n]
+        subsystem = data.get("subsystem", "Unknown subsystem")
+        rxn_x.append(x)
+        rxn_y.append(y)
+        rxn_ids_for_plot.append(n)
+        rxn_color.append(subsystem_color.get(subsystem, "#334155"))
+        rxn_hover.append(
+            f"<b>{data.get('label', n)}</b><br>"
+            f"Reaction ID: {n}<br>"
+            f"Subsystem: {subsystem}<br>"
+            f"In-degree: {G.in_degree(n)}<br>"
+            f"Out-degree: {G.out_degree(n)}"
+        )
+
+    rxn_trace = go.Scatter(
+        x=rxn_x,
+        y=rxn_y,
+        mode="markers",
+        marker=dict(size=11, color=rxn_color, symbol="square", line=dict(width=0.8, color="#ffffff")),
+        hovertext=rxn_hover,
+        hoverinfo="text",
+        customdata=rxn_ids_for_plot,
+        name="Reactions",
+        visible=True,
+    )
+
+    met_x, met_y, met_hover, met_color, met_size, met_ids_for_plot = [], [], [], [], [], []
+    for n in met_nodes:
+        if n not in pos:
+            continue
+        x, y = pos[n]
+        data = G.nodes[n]
+        dom_sub = met_dominant_subsystem.get(n, "Unknown subsystem")
+        met_x.append(x)
+        met_y.append(y)
+        met_ids_for_plot.append(n)
+        met_color.append(subsystem_color.get(dom_sub, "#94a3b8"))
+        met_size.append(min(16, 6 + 1.7 * (G.in_degree(n) + G.out_degree(n))))
+        met_hover.append(
+            f"<b>{data.get('label', n)}</b><br>"
+            f"Metabolite ID: {n}<br>"
+            f"Compartment: {data.get('compartment', '?')}<br>"
+            f"Dominant subsystem: {dom_sub}<br>"
+            f"Connections: {G.in_degree(n) + G.out_degree(n)}"
+        )
+
+    met_trace = go.Scatter(
+        x=met_x,
+        y=met_y,
+        mode="markers",
+        marker=dict(size=met_size, color=met_color, symbol="circle", opacity=0.86,
+                    line=dict(width=0.8, color="#f8fafc")),
+        hovertext=met_hover,
+        hoverinfo="text",
+        customdata=met_ids_for_plot,
+        name="Metabolites",
+        visible=True,
+    )
+
+    # Subsystem module (semantic zoom) view
+    module_links: dict[tuple[str, str], int] = defaultdict(int)
+    for met in met_nodes:
+        neighbors = [
+            n for n in (list(G.predecessors(met)) + list(G.successors(met)))
+            if G.nodes[n].get("node_type") == "reaction"
+        ]
+        subs = sorted({G.nodes[r].get("subsystem", "Unknown subsystem") for r in neighbors})
+        for i in range(len(subs)):
+            for j in range(i + 1, len(subs)):
+                module_links[(subs[i], subs[j])] += 1
+
+    module_pos: dict[str, tuple[float, float]] = {}
+    for i, sub in enumerate(subsystem_order):
+        angle = (2.0 * math.pi * i) / n_subsystems
+        module_pos[sub] = ((hub_radius + 0.3) * math.cos(angle), (hub_radius + 0.3) * math.sin(angle))
+
+    mod_edge_x, mod_edge_y = [], []
+    for (s1, s2), _w in module_links.items():
+        x0, y0 = module_pos[s1]
+        x1, y1 = module_pos[s2]
+        mod_edge_x += [x0, x1, None]
+        mod_edge_y += [y0, y1, None]
+
+    module_edge_trace = go.Scatter(
+        x=mod_edge_x,
+        y=mod_edge_y,
+        mode="lines",
+        line=dict(width=2.0, color="#94a3b8"),
+        hoverinfo="none",
+        showlegend=False,
+        name="Module links",
+        visible=False,
+    )
+
+    module_x, module_y, module_sizes, module_colors, module_hover = [], [], [], [], []
+    for sub in subsystem_order:
+        x, y = module_pos[sub]
+        cnt = subsystem_counts[sub]
+        module_x.append(x)
+        module_y.append(y)
+        module_sizes.append(min(95, 24 + 6 * math.sqrt(max(cnt, 1))))
+        module_colors.append(subsystem_color.get(sub, "#64748b"))
+        module_hover.append(
+            f"<b>{sub}</b><br>"
+            f"Reactions in module: {cnt}<br>"
+            f"Inter-module links: {sum(1 for (a, b) in module_links if a == sub or b == sub)}"
+        )
+
+    module_trace = go.Scatter(
+        x=module_x,
+        y=module_y,
+        mode="markers+text",
+        text=[sub if len(sub) <= 28 else sub[:25] + "…" for sub in subsystem_order],
+        textposition="middle center",
+        textfont=dict(size=10, color="#0f172a"),
+        marker=dict(size=module_sizes, color=module_colors, symbol="circle", opacity=0.92,
+                    line=dict(width=2.5, color="#ffffff")),
+        hovertext=module_hover,
+        hoverinfo="text",
+        name="Subsystem modules",
+        visible=False,
+    )
+
+    fig = go.Figure(data=[edge_trace, highlight_edge_trace, met_trace, rxn_trace, module_edge_trace, module_trace])
+    fig.update_layout(
+        title=dict(
+            text=(
+                "Reaction–Metabolite Network (Semantic Clustered)<br>"
+                f"<sup>{len(G.nodes())} nodes • {len(G.edges())} edges • {n_subsystems} subsystems</sup>"
+            ),
+            font=dict(size=16),
+            x=0.5,
         ),
+        showlegend=True,
+        hovermode="closest",
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        plot_bgcolor="#f8fafc",
+        paper_bgcolor="#f8fafc",
+        margin=dict(l=20, r=20, t=92, b=20),
+        updatemenus=[
+            dict(
+                type="buttons",
+                direction="right",
+                x=0.01,
+                y=1.15,
+                xanchor="left",
+                yanchor="top",
+                buttons=[
+                    dict(
+                        label="Detailed view",
+                        method="update",
+                        args=[
+                            {"visible": [True, True, True, True, False, False]},
+                            {
+                                "title.text": (
+                                    "Reaction–Metabolite Network (Detailed semantic layout)<br>"
+                                    f"<sup>{len(G.nodes())} nodes • {len(G.edges())} edges • {n_subsystems} subsystems</sup>"
+                                )
+                            },
+                        ],
+                    ),
+                    dict(
+                        label="Subsystem modules",
+                        method="update",
+                        args=[
+                            {"visible": [False, False, False, False, True, True]},
+                            {
+                                "title.text": (
+                                    "Reaction–Metabolite Network (Subsystem module view)<br>"
+                                    f"<sup>{n_subsystems} pathway modules • switch back to expand details</sup>"
+                                )
+                            },
+                        ],
+                    ),
+                ],
+            )
+        ],
+        annotations=[
+            dict(
+                x=0.01,
+                y=1.08,
+                xref="paper",
+                yref="paper",
+                text=(
+                    "<b>Semantic clustering:</b> reaction nodes are grouped by subsystem; "
+                    "metabolites inherit dominant neighboring subsystem color."
+                ),
+                showarrow=False,
+                align="left",
+                font=dict(size=11, color="#334155"),
+            )
+        ],
     )
 
     out_html = out_dir / "reaction_network.html"
-    fig.write_html(str(out_html))
+    reaction_post_script = f"""
+    (function() {{
+      const gd = document.getElementsByClassName('plotly-graph-div')[0];
+      if (!gd || !window.Plotly) return;
+
+      const rxnToMets = {_json.dumps({k: sorted(v) for k, v in rxn_to_metabolites.items()})};
+      const rxnToSegments = {_json.dumps({k: v for k, v in rxn_to_edge_segments.items()})};
+
+      const EDGE_TRACE_IDX = 0;
+      const HILITE_EDGE_TRACE_IDX = 1;
+      const MET_TRACE_IDX = 2;
+      const RXN_TRACE_IDX = 3;
+
+      function clearHighlight() {{
+        const rxnCount = (gd.data[RXN_TRACE_IDX].x || []).length;
+        const metCount = (gd.data[MET_TRACE_IDX].x || []).length;
+        Plotly.restyle(gd, {{
+          'marker.opacity': [Array(rxnCount).fill(1.0)],
+          'marker.size': [Array(rxnCount).fill(11)]
+        }}, [RXN_TRACE_IDX]);
+        Plotly.restyle(gd, {{
+          'marker.opacity': [Array(metCount).fill(0.86)]
+        }}, [MET_TRACE_IDX]);
+        Plotly.restyle(gd, {{'opacity': [1.0]}}, [EDGE_TRACE_IDX]);
+        Plotly.restyle(gd, {{'x': [[]], 'y': [[]], 'opacity': [0.0]}}, [HILITE_EDGE_TRACE_IDX]);
+        Plotly.relayout(gd, {{'xaxis.autorange': true, 'yaxis.autorange': true}});
+      }}
+
+      function applyHighlight(reactionIds) {{
+        const selected = new Set((reactionIds || []).map(String));
+        if (!selected.size) {{
+          clearHighlight();
+          return;
+        }}
+
+        const rxnCustom = gd.data[RXN_TRACE_IDX].customdata || [];
+        const rxnOpacity = [];
+        const rxnSizes = [];
+        const selectedRxnXY = [];
+        for (let i = 0; i < rxnCustom.length; i += 1) {{
+          const rid = String(rxnCustom[i]);
+          const on = selected.has(rid);
+          rxnOpacity.push(on ? 1.0 : 0.10);
+          rxnSizes.push(on ? 16 : 9);
+          if (on) selectedRxnXY.push([gd.data[RXN_TRACE_IDX].x[i], gd.data[RXN_TRACE_IDX].y[i]]);
+        }}
+        Plotly.restyle(gd, {{
+          'marker.opacity': [rxnOpacity],
+          'marker.size': [rxnSizes]
+        }}, [RXN_TRACE_IDX]);
+
+        const linkedMets = new Set();
+        selected.forEach(rid => (rxnToMets[rid] || []).forEach(mid => linkedMets.add(String(mid))));
+        const metCustom = gd.data[MET_TRACE_IDX].customdata || [];
+        const metOpacity = [];
+        const selectedMetXY = [];
+        for (let i = 0; i < metCustom.length; i += 1) {{
+          const mid = String(metCustom[i]);
+          const on = linkedMets.has(mid);
+          metOpacity.push(on ? 0.96 : 0.08);
+          if (on) selectedMetXY.push([gd.data[MET_TRACE_IDX].x[i], gd.data[MET_TRACE_IDX].y[i]]);
+        }}
+        Plotly.restyle(gd, {{'marker.opacity': [metOpacity]}}, [MET_TRACE_IDX]);
+
+        const hx = [];
+        const hy = [];
+        selected.forEach(rid => {{
+          (rxnToSegments[rid] || []).forEach(seg => {{
+            hx.push(seg[0], seg[2], null);
+            hy.push(seg[1], seg[3], null);
+          }});
+        }});
+        Plotly.restyle(gd, {{'x': [hx], 'y': [hy], 'opacity': [hx.length ? 1.0 : 0.0]}}, [HILITE_EDGE_TRACE_IDX]);
+        Plotly.restyle(gd, {{'opacity': [0.15]}}, [EDGE_TRACE_IDX]);
+
+        const pts = selectedRxnXY.concat(selectedMetXY);
+        if (pts.length) {{
+          const xs = pts.map(p => p[0]);
+          const ys = pts.map(p => p[1]);
+          const minX = Math.min.apply(null, xs);
+          const maxX = Math.max.apply(null, xs);
+          const minY = Math.min.apply(null, ys);
+          const maxY = Math.max.apply(null, ys);
+          const padX = Math.max(0.2, (maxX - minX) * 0.35 + 0.12);
+          const padY = Math.max(0.2, (maxY - minY) * 0.35 + 0.12);
+          Plotly.relayout(gd, {{
+            'xaxis.range': [minX - padX, maxX + padX],
+            'yaxis.range': [minY - padY, maxY + padY]
+          }});
+        }}
+      }}
+
+      window.addEventListener('message', function(event) {{
+        const msg = event.data || {{}};
+        if (msg.type === 'gsmm-highlight-reactions') {{
+          applyHighlight(msg.reactionIds || []);
+        }}
+        if (msg.type === 'gsmm-clear-reaction-highlight') {{
+          clearHighlight();
+        }}
+      }});
+    }})();
+    """
+    fig.write_html(
+        str(out_html),
+        include_plotlyjs="cdn",
+        config={"displayModeBar": True, "scrollZoom": True, "displaylogo": False},
+        post_script=reaction_post_script,
+    )
     log.info("  Saved: %s", out_html)
 
-
-# ---------------------------------------------------------------------------
-# 6b. Interactive Plotly dashboard (overview of all key statistics)
-# ---------------------------------------------------------------------------
 
 def plot_dashboard(
     model: "cobra.Model",
@@ -937,6 +1332,18 @@ def run_mutation_analysis(
     # ── knockout screen ──────────────────────────────────────────────────────
     ko_rows: list[dict] = []
     for gene in genes:
+        reaction_ids = sorted(r.id for r in gene.reactions)
+        subsystem_votes = [
+            (r.subsystem or "").strip()
+            for r in gene.reactions
+            if (r.subsystem or "").strip()
+        ]
+        dominant_subsystem = (
+            Counter(subsystem_votes).most_common(1)[0][0]
+            if subsystem_votes
+            else "Unknown subsystem"
+        )
+        gene_product = gene.name or gene.id
         try:
             with model:
                 gene.knock_out()
@@ -948,7 +1355,10 @@ def run_mutation_analysis(
         ko_rows.append({
             "gene_id":    gene.id,
             "gene_name":  gene.name or gene.id,
+            "gene_product": gene_product,
             "n_reactions": len(gene.reactions),
+            "subsystem": dominant_subsystem,
+            "reaction_ids": "|".join(reaction_ids),
             "type":       "knockout",
             "wt_growth":  round(wt_growth, 6),
             "mut_growth": round(ko_growth, 6),
@@ -968,6 +1378,18 @@ def run_mutation_analysis(
     log.info("    %d knockout genes screened; %d knockin candidates.", len(genes), len(ki_genes))
 
     for gene in ki_genes[:max_genes]:
+        reaction_ids = sorted(r.id for r in gene.reactions)
+        subsystem_votes = [
+            (r.subsystem or "").strip()
+            for r in gene.reactions
+            if (r.subsystem or "").strip()
+        ]
+        dominant_subsystem = (
+            Counter(subsystem_votes).most_common(1)[0][0]
+            if subsystem_votes
+            else "Unknown subsystem"
+        )
+        gene_product = gene.name or gene.id
         try:
             with model:
                 for rxn in gene.reactions:
@@ -986,7 +1408,10 @@ def run_mutation_analysis(
         ki_rows.append({
             "gene_id":    gene.id,
             "gene_name":  gene.name or gene.id,
+            "gene_product": gene_product,
             "n_reactions": len(gene.reactions),
+            "subsystem": dominant_subsystem,
+            "reaction_ids": "|".join(reaction_ids),
             "type":       "knockin",
             "wt_growth":  round(wt_growth, 6),
             "mut_growth": round(ki_growth, 6),
@@ -1003,121 +1428,253 @@ def run_mutation_analysis(
     # ── Plotly figure ────────────────────────────────────────────────────────
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
+    import random
 
     ko_df = df[df["type"] == "knockout"].copy()
     ki_df = df[df["type"] == "knockin"].copy()
 
-    n_essential  = int(ko_df["essential"].sum())
+    ko_df["subsystem"] = ko_df["subsystem"].fillna("Unknown subsystem")
+    ko_df.loc[ko_df["subsystem"].astype(str).str.strip() == "", "subsystem"] = "Unknown subsystem"
+
+    n_essential = int(ko_df["essential"].sum())
     n_nonessential = int((~ko_df["essential"]).sum())
 
-    # colour per category
-    ko_df["color"] = ko_df["essential"].map({True: "#C44E52", False: "#55A868"})
-    if not ki_df.empty:
-        ki_df["color"] = ki_df["growth_change_pct"].apply(
-            lambda v: "#4C72B0" if v > 1 else "#CCB974"
+    subsystem_stats = (
+        ko_df.groupby("subsystem", as_index=False)
+        .agg(
+            n_genes=("gene_id", "count"),
+            n_essential=("essential", "sum"),
+            median_growth=("growth_ratio", "median"),
         )
-
-    has_ki = not ki_df.empty
-    n_rows  = 3 if has_ki else 2
-    titles  = ["Knockout: growth ratio per gene",
-               f"Knockout summary  (essential: {n_essential}, non-essential: {n_nonessential})"]
-    if has_ki:
-        titles.append("Knockin: growth change per candidate gene")
-    specs = [[{"type": "scatter"}]] + [[{"type": "bar"}]] + ([[{"type": "scatter"}]] if has_ki else [])
-
-    fig = make_subplots(
-        rows=n_rows, cols=1,
-        subplot_titles=titles,
-        specs=specs,
-        vertical_spacing=0.10,
-        row_heights=[0.45, 0.20, 0.35][:n_rows],
+    )
+    subsystem_stats["essential_pct"] = (
+        100.0 * subsystem_stats["n_essential"] / subsystem_stats["n_genes"].clip(lower=1)
+    )
+    subsystem_stats = subsystem_stats.sort_values(
+        ["essential_pct", "median_growth", "n_genes"],
+        ascending=[False, True, False],
     )
 
-    # Row 1 — KO scatter: gene index vs growth ratio
-    ko_df_sorted = ko_df.sort_values("growth_ratio")
-    fig.add_trace(go.Scatter(
-        x=list(range(len(ko_df_sorted))),
-        y=ko_df_sorted["growth_ratio"].tolist(),
-        mode="markers",
-        marker=dict(
-            color=ko_df_sorted["color"].tolist(),
-            size=6,
-            opacity=0.8,
-            line=dict(width=0.3, color="white"),
-        ),
-        text=[
-            f"<b>{row['gene_name']}</b> ({row['gene_id']})<br>"
-            f"Reactions: {row['n_reactions']}<br>"
-            f"Growth ratio: {row['growth_ratio']:.4f}<br>"
-            f"{'ESSENTIAL' if row['essential'] else 'non-essential'}"
-            for _, row in ko_df_sorted.iterrows()
-        ],
-        hoverinfo="text",
-        name="Knockout",
-    ), row=1, col=1)
-    # threshold line at 5 %
-    fig.add_hline(y=0.05, line_dash="dash", line_color="#C44E52",
-                  annotation_text="Essential threshold (5%)", row=1, col=1)
-    fig.add_hline(y=1.0, line_dash="dot", line_color="#888",
-                  annotation_text="Wild-type growth", row=1, col=1)
+    subsystem_order = subsystem_stats["subsystem"].tolist()
+    sub_to_idx = {s: i for i, s in enumerate(subsystem_order)}
 
-    # Row 2 — KO summary bar
-    fig.add_trace(go.Bar(
-        x=["Essential", "Non-essential"],
-        y=[n_essential, n_nonessential],
-        marker_color=["#C44E52", "#55A868"],
-        text=[str(n_essential), str(n_nonessential)],
-        textposition="outside",
-        showlegend=False,
-    ), row=2, col=1)
+    ko_plot = ko_df.sort_values(["subsystem", "growth_ratio", "gene_id"]).copy()
+    rng = random.Random(42)
+    ko_plot["x_num"] = [
+        float(sub_to_idx.get(sub, 0)) + rng.uniform(-0.26, 0.26)
+        for sub in ko_plot["subsystem"].tolist()
+    ]
+    ko_plot["point_color"] = ko_plot["essential"].map({True: "#dc2626", False: "#059669"})
+    ko_plot["point_symbol"] = ko_plot["essential"].map({True: "diamond", False: "circle"})
 
-    # Row 3 — KI scatter (optional)
+    has_ki = not ki_df.empty
+    n_rows = 3 if has_ki else 2
+    titles = [
+        "Subsystem Vulnerability Plot (KO growth ratio by metabolic pathway)",
+        "Subsystem essentiality burden (% essential knockout genes)",
+    ]
     if has_ki:
-        ki_df_sorted = ki_df.sort_values("growth_change_pct", ascending=False)
-        fig.add_trace(go.Scatter(
-            x=list(range(len(ki_df_sorted))),
-            y=ki_df_sorted["growth_change_pct"].tolist(),
+        titles.append("Knockin: growth change per candidate gene")
+    specs = [[{"type": "scatter"}], [{"type": "bar"}]] + ([[{"type": "scatter"}]] if has_ki else [])
+
+    fig = make_subplots(
+        rows=n_rows,
+        cols=1,
+        subplot_titles=titles,
+        specs=specs,
+        vertical_spacing=0.09,
+        row_heights=[0.52, 0.22, 0.26][:n_rows],
+    )
+
+    ko_custom = [
+        [
+            str(row["gene_id"]),
+            str(row["gene_name"]),
+            str(row.get("gene_product", row["gene_name"])),
+            str(row["subsystem"]),
+            float(row["growth_ratio"]),
+            str(row.get("reaction_ids", "")),
+        ]
+        for _, row in ko_plot.iterrows()
+    ]
+    fig.add_trace(
+        go.Scatter(
+            x=ko_plot["x_num"].tolist(),
+            y=ko_plot["growth_ratio"].tolist(),
             mode="markers",
             marker=dict(
-                color=ki_df_sorted["color"].tolist(),
-                size=6,
-                opacity=0.8,
-                line=dict(width=0.3, color="white"),
+                color=ko_plot["point_color"].tolist(),
+                symbol=ko_plot["point_symbol"].tolist(),
+                size=8,
+                opacity=0.85,
+                line=dict(width=0.5, color="#ffffff"),
             ),
+            customdata=ko_custom,
+            hovertemplate=(
+                "<b>%{customdata[1]}</b><br>"
+                "Gene ID: %{customdata[0]}<br>"
+                "Gene product: %{customdata[2]}<br>"
+                "Subsystem: %{customdata[3]}<br>"
+                "Growth ratio: %{customdata[4]:.4f}<extra></extra>"
+            ),
+            name="Knockout genes",
+            showlegend=False,
+        ),
+        row=1,
+        col=1,
+    )
+
+    for _, row in subsystem_stats.iterrows():
+        if row["n_genes"] >= 3 and row["essential_pct"] >= 40.0:
+            idx = sub_to_idx.get(str(row["subsystem"]), 0)
+            fig.add_vrect(
+                x0=idx - 0.5,
+                x1=idx + 0.5,
+                fillcolor="rgba(245, 101, 101, 0.14)",
+                line_width=0,
+                layer="below",
+                row=1,
+                col=1,
+            )
+
+    fig.add_hline(
+        y=0.05,
+        line_dash="dash",
+        line_color="#dc2626",
+        annotation_text="Essentiality threshold (growth < 0.05)",
+        row=1,
+        col=1,
+    )
+    fig.add_hline(y=1.0, line_dash="dot", line_color="#64748b", row=1, col=1)
+
+    sub_bar_colors = [
+        "#ef4444" if pct >= 40 else ("#f59e0b" if pct >= 20 else "#10b981")
+        for pct in subsystem_stats["essential_pct"].tolist()
+    ]
+    fig.add_trace(
+        go.Bar(
+            x=subsystem_stats["subsystem"].tolist(),
+            y=subsystem_stats["essential_pct"].tolist(),
+            marker_color=sub_bar_colors,
             text=[
-                f"<b>{row['gene_name']}</b> ({row['gene_id']})<br>"
-                f"Reactions: {row['n_reactions']}<br>"
-                f"Growth change: {row['growth_change_pct']:+.2f}%"
-                for _, row in ki_df_sorted.iterrows()
+                f"{pct:.1f}% ({int(ne)}/{int(ng)})"
+                for pct, ne, ng in zip(
+                    subsystem_stats["essential_pct"],
+                    subsystem_stats["n_essential"],
+                    subsystem_stats["n_genes"],
+                )
             ],
-            hoverinfo="text",
-            name="Knockin",
-        ), row=3, col=1)
-        fig.add_hline(y=0, line_dash="dot", line_color="#888", row=3, col=1)
+            textposition="outside",
+            hovertemplate=(
+                "<b>%{x}</b><br>"
+                "Essential genes: %{text}<br>"
+                "Essentiality burden: %{y:.2f}%<extra></extra>"
+            ),
+            name="Essentiality burden",
+            showlegend=False,
+        ),
+        row=2,
+        col=1,
+    )
+
+    if has_ki:
+        ki_df_sorted = ki_df.sort_values("growth_change_pct", ascending=False)
+        fig.add_trace(
+            go.Scatter(
+                x=list(range(len(ki_df_sorted))),
+                y=ki_df_sorted["growth_change_pct"].tolist(),
+                mode="markers",
+                marker=dict(
+                    color=ki_df_sorted["growth_change_pct"].apply(
+                        lambda v: "#2563eb" if v > 1 else "#d97706"
+                    ).tolist(),
+                    size=6,
+                    opacity=0.82,
+                    line=dict(width=0.4, color="white"),
+                ),
+                hovertemplate=(
+                    "<b>%{customdata[1]}</b><br>"
+                    "Gene ID: %{customdata[0]}<br>"
+                    "Subsystem: %{customdata[2]}<br>"
+                    "Growth change: %{y:+.2f}%<extra></extra>"
+                ),
+                customdata=[
+                    [
+                        str(row["gene_id"]),
+                        str(row["gene_name"]),
+                        str(row.get("subsystem", "Unknown subsystem")),
+                    ]
+                    for _, row in ki_df_sorted.iterrows()
+                ],
+                name="Knockin",
+                showlegend=False,
+            ),
+            row=3,
+            col=1,
+        )
+        fig.add_hline(y=0, line_dash="dot", line_color="#64748b", row=3, col=1)
 
     fig.update_layout(
         title_text=(
-            f"Mutation Analysis — {model.id or 'model'}<br>"
+            f"Mutation Analysis — Subsystem Vulnerability ({model.id or 'model'})<br>"
             f"<sup>WT growth = {wt_growth:.4f}  |  "
             f"Genes screened = {len(genes)}  |  "
             f"Essential KO = {n_essential}</sup>"
         ),
         title_font_size=15,
-        height=200 * n_rows + 300,
+        height=280 * n_rows + 200,
         paper_bgcolor="white",
         plot_bgcolor="white",
         showlegend=False,
+        margin=dict(l=80, r=30, t=95, b=40),
     )
-    fig.update_xaxes(title_text="Gene rank", row=1, col=1)
+    fig.update_xaxes(
+        title_text="Metabolic subsystem / pathway",
+        row=1,
+        col=1,
+        tickmode="array",
+        tickvals=list(range(len(subsystem_order))),
+        ticktext=[s if len(s) <= 28 else s[:25] + "…" for s in subsystem_order],
+        tickangle=35,
+        range=[-0.7, max(len(subsystem_order) - 0.3, 0.7)],
+    )
     fig.update_yaxes(title_text="Growth ratio (KO / WT)", row=1, col=1)
-    fig.update_xaxes(title_text="Category", row=2, col=1)
-    fig.update_yaxes(title_text="Gene count", row=2, col=1)
+    fig.update_xaxes(title_text="Subsystem", row=2, col=1, tickangle=35)
+    fig.update_yaxes(title_text="Essential genes (%)", row=2, col=1, range=[0, 100])
     if has_ki:
-        fig.update_xaxes(title_text="Gene rank", row=3, col=1)
+        fig.update_xaxes(title_text="Knockin candidate rank", row=3, col=1)
         fig.update_yaxes(title_text="Growth change (%)", row=3, col=1)
 
+    mutation_post_script = """
+    (function() {
+      const gd = document.getElementsByClassName('plotly-graph-div')[0];
+      if (!gd) return;
+      gd.on('plotly_click', function(ev) {
+        if (!ev || !ev.points || !ev.points.length) return;
+        const pt = ev.points[0];
+        const cd = pt.customdata;
+        if (!cd || !Array.isArray(cd) || cd.length < 6) return;
+        const rxnRaw = (cd[5] || '').toString();
+        const reactionIds = rxnRaw ? rxnRaw.split('|').filter(Boolean) : [];
+        if (!reactionIds.length) return;
+        window.parent.postMessage({
+          type: 'gsmm-highlight-reactions',
+          reactionIds: reactionIds,
+          geneId: cd[0],
+          geneName: cd[1],
+          subsystem: cd[3]
+        }, '*');
+      });
+    })();
+    """
+
     out_html = out_dir / "mutation_analysis.html"
-    fig.write_html(str(out_html))
+    fig.write_html(
+        str(out_html),
+        include_plotlyjs="cdn",
+        config={"displayModeBar": True, "scrollZoom": True, "displaylogo": False},
+        post_script=mutation_post_script,
+    )
     log.info("  Saved: %s  (%d KO, %d KI records)", out_html, len(ko_df), len(ki_df))
 
     return df
@@ -1195,9 +1752,15 @@ def run_all_visualizations(
     _script_dir = Path(__file__).parent
     gene_config_path = _script_dir / "gene_config.json"
     if not gene_config_path.is_file():
+        gene_config_path = _script_dir.parent / "config" / "gene_config.json"
+    if not gene_config_path.is_file():
         gene_config_path = out_dir.parent.parent / "gene_config.json"
     if not gene_config_path.is_file():
+        gene_config_path = out_dir.parent.parent / "config" / "gene_config.json"
+    if not gene_config_path.is_file():
         gene_config_path = Path("gene_config.json")
+    if not gene_config_path.is_file():
+        gene_config_path = Path("config") / "gene_config.json"
     if gene_config_path.is_file():
         try:
             from gene_config import load_gene_config, apply_gene_config
@@ -1382,7 +1945,10 @@ def generate_index_html(
     env_presets: dict = {}
     # Look for environments.json relative to the model (up two levels from viz dir)
     for candidate in [out_dir.parent.parent / "environments.json",
+                      out_dir.parent.parent / "config" / "environments.json",
                       out_dir.parent / "environments.json",
+                      out_dir.parent / "config" / "environments.json",
+                      Path("config") / "environments.json",
                       Path("environments.json")]:
         if candidate.is_file():
             try:
@@ -1425,7 +1991,9 @@ def generate_index_html(
     for i, (fn, lbl) in enumerate(available_html):
         active = "active" if i == 0 else ""
         iframe_tabs += (
-            f'<button class="tab-btn {active}" onclick="switchIframe(this,\'iframe-{i}\')">'
+            f'<button id="iframe-tab-{i}" class="tab-btn {active}" '
+            f'data-target="iframe-{i}" data-src="{fn}" '
+            f'onclick="switchIframe(this,\'iframe-{i}\')">'
             f'{lbl}</button>\n'
         )
         display = "block" if i == 0 else "none"
@@ -1861,6 +2429,8 @@ def generate_index_html(
 </div>
 
 <script>
+let __lastReactionHighlight = null;
+
 // ── panel switching ──────────────────────────────────────────────────────────
 function switchPanel(btn, id) {{
   document.querySelectorAll('.main-tab').forEach(b => b.classList.remove('active'));
@@ -1874,8 +2444,42 @@ function switchIframe(btn, id) {{
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.querySelectorAll('iframe').forEach(f => f.style.display = 'none');
   btn.classList.add('active');
-  document.getElementById(id).style.display = 'block';
+  const frame = document.getElementById(id);
+  frame.style.display = 'block';
+
+  if (__lastReactionHighlight && (frame.getAttribute('src') || '').includes('reaction_network.html')) {{
+    try {{
+      frame.contentWindow.postMessage(__lastReactionHighlight, '*');
+      setTimeout(() => frame.contentWindow.postMessage(__lastReactionHighlight, '*'), 250);
+    }} catch (e) {{}}
+  }}
 }}
+
+function _broadcastToReportIframes(message) {{
+  document.querySelectorAll('#panel-reports iframe').forEach(frame => {{
+    if (!frame || !frame.contentWindow) return;
+    try {{
+      frame.contentWindow.postMessage(message, '*');
+    }} catch (e) {{}}
+  }});
+}}
+
+window.addEventListener('message', function(event) {{
+  const msg = event.data || {{}};
+  if (msg.type === 'gsmm-highlight-reactions') {{
+    __lastReactionHighlight = msg;
+    const reactionBtn = Array.from(document.querySelectorAll('.tab-btn'))
+      .find(b => (b.dataset.src || '').includes('reaction_network.html'));
+    if (reactionBtn) {{
+      switchIframe(reactionBtn, reactionBtn.dataset.target);
+    }}
+    _broadcastToReportIframes(msg);
+  }}
+  if (msg.type === 'gsmm-clear-reaction-highlight') {{
+    __lastReactionHighlight = null;
+    _broadcastToReportIframes(msg);
+  }}
+}});
 
 // ── environment editor ────────────────────────────────────────────────────────
 const ORIG_BOUNDS = {orig_bounds_json};
@@ -2000,6 +2604,7 @@ function updateCmd() {{
     cmd += '# "\\n';
   }}
 
+  cmd = cmd.replace('python generate_model.py', 'python src/generate_model.py');
   document.getElementById('cmd-text').textContent = cmd;
 }}
 
