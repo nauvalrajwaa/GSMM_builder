@@ -1,8 +1,0 @@
-[1]
-add feature to flexible adding gene to system or knock out gene from system, make some input config file to regulate
-
-[2]
-escher visualization for added genes or knockout genes
-
-[3]
-add several mode environment like salt, acid, etc thats flexible to change

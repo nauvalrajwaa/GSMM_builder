@@ -1,0 +1,10 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Generated pipeline outputs
+output/
+tests_realdata/
+
+# Local caches/artifacts
+config/sample_kegg_cache.json
